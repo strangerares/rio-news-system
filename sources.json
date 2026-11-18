@@ -4,20 +4,44 @@
     {
       "name": "Rio Prefeitura News",
       "url": "https://en.prefeitura.rio/noticias/",
-      "language": "en",
-      "type": "web"
+      "type": "wordpress",
+      "category": "Tourism"
     },
     {
-      "name": "Riotur Events Calendar",
+      "name": "Riotur Official Events Calendar",
       "url": "https://riotur.rio/editorial/calendario-eventos/",
-      "language": "pt",
-      "type": "web"
+      "type": "events",
+      "category": "Events"
     },
     {
       "name": "Rio Cultural Agenda",
       "url": "https://cultura.prefeitura.rio/agendacultural/",
-      "language": "pt",
-      "type": "web"
+      "type": "events",
+      "category": "Culture"
+    },
+    {
+      "name": "Circo Voador",
+      "url": "https://www.circovoador.com.br/",
+      "type": "events",
+      "category": "Music"
+    },
+    {
+      "name": "Vivo Rio",
+      "url": "https://vivorio.com.br/",
+      "type": "events",
+      "category": "Music"
+    },
+    {
+      "name": "Fundição Progresso",
+      "url": "https://www.fundicaoprogresso.com.br/programacao",
+      "type": "events",
+      "category": "Music"
+    },
+    {
+      "name": "Qualistage",
+      "url": "https://qualistage.com.br/eventos",
+      "type": "events",
+      "category": "Music"
     }
   ]
 }
