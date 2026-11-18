@@ -15,7 +15,24 @@ supabase = create_client(
     SUPABASE_SERVICE_ROLE_KEY
 )
 
+def article_exists(source_url):
+    if not source_url:
+        return False
 
+    try:
+        existing = (
+            supabase.table("news_articles")
+            .select("id")
+            .eq("source_url", source_url)
+            .limit(1)
+            .execute()
+        )
+
+        return bool(existing.data)
+
+    except Exception as error:
+        logger.exception("Duplicate check failed: %s", error)
+        return True
 def save_article(article):
     source_url = article.get("source_url")
 
