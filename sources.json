@@ -1,0 +1,23 @@
+
+{
+  "sources": [
+    {
+      "name": "Rio Prefeitura News",
+      "url": "https://en.prefeitura.rio/noticias/",
+      "language": "en",
+      "type": "web"
+    },
+    {
+      "name": "Riotur Events Calendar",
+      "url": "https://riotur.rio/editorial/calendario-eventos/",
+      "language": "pt",
+      "type": "web"
+    },
+    {
+      "name": "Rio Cultural Agenda",
+      "url": "https://cultura.prefeitura.rio/agendacultural/",
+      "language": "pt",
+      "type": "web"
+    }
+  ]
+}
