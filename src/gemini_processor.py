@@ -16,12 +16,15 @@ MAX_RETRIES = 3
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 
+class GeminiQuotaExceeded(Exception):
+    """Raised when Gemini API quota is exhausted."""
+    pass
+
+
 def extract_json(text):
     """Extract JSON from Gemini's response."""
 
     text = text.strip()
-
-    # Remove Markdown code fences if Gemini includes them.
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
 
@@ -29,7 +32,7 @@ def extract_json(text):
 
 
 def is_quota_error(error):
-    """Identify quota exhaustion errors that should not be retried."""
+    """Identify quota exhaustion errors."""
 
     message = str(error).lower()
 
@@ -42,7 +45,7 @@ def is_quota_error(error):
 
 
 def is_temporary_error(error):
-    """Identify temporary service errors that may be retried."""
+    """Identify temporary service errors."""
 
     message = str(error).lower()
 
@@ -58,8 +61,9 @@ def process_article(article):
     """
     Process one collected article with Gemini.
 
-    Returns the processed article dictionary,
-    or None if processing cannot be completed.
+    Returns a processed article dictionary,
+    or None if the article cannot be processed.
+    Raises GeminiQuotaExceeded if the API quota is exhausted.
     """
 
     title = (
@@ -161,13 +165,15 @@ ORIGINAL CONTENT:
 
             if is_quota_error(error):
                 logger.error(
-                    "Gemini daily quota exhausted. "
-                    "Stopping immediately without retrying. "
+                    "Gemini quota exhausted. Stopping all processing. "
                     "Article: %s | Error: %s",
                     title,
                     error
                 )
-                return None
+
+                raise GeminiQuotaExceeded(
+                    "Gemini API quota exhausted."
+                ) from error
 
             if is_temporary_error(error):
                 if attempt < MAX_RETRIES:
@@ -188,6 +194,7 @@ ORIGINAL CONTENT:
                 title,
                 error
             )
+
             return None
 
     return None
