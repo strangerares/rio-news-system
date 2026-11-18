@@ -2,17 +2,17 @@
 import json
 import logging
 import re
+
 import requests
 
 from bs4 import BeautifulSoup
-from datetime import datetime
 from urllib.parse import urljoin, urlparse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 HEADERS = {
-    "User-Agent": "RioNewsCollector/1.0 (tourism information project)"
+    "User-Agent": "Mozilla/5.0 (compatible; RioNewsCollector/1.0)"
 }
 
 MAX_ARTICLES_PER_SOURCE = 15
@@ -40,208 +40,224 @@ def fetch_page(url):
 
 
 def clean_text(value):
-    if not value:
-        return ""
-
-    if isinstance(value, list):
-        value = " ".join(str(item) for item in value)
-
-    if isinstance(value, dict):
-        value = value.get("name", "")
-
-    return re.sub(r"\s+", " ", str(value)).strip()
+    return re.sub(r"\s+", " ", value or "").strip()
 
 
-def extract_image(value):
-    if isinstance(value, list):
-        value = value[0] if value else ""
+def extract_article(url):
+    html = fetch_page(url)
 
-    if isinstance(value, dict):
-        value = value.get("url", "")
+    if not html:
+        return "", ""
 
-    return clean_text(value)
-
-
-def extract_jsonld_items(data):
-    items = []
-
-    if isinstance(data, list):
-        for item in data:
-            items.extend(extract_jsonld_items(item))
-
-    elif isinstance(data, dict):
-        if "@graph" in data:
-            items.extend(extract_jsonld_items(data["@graph"]))
-
-        else:
-            items.append(data)
-
-    return items
-
-
-def collect_jsonld_events(source, html):
     soup = BeautifulSoup(html, "html.parser")
-    articles = []
 
-    for script in soup.find_all(
-        "script",
-        type="application/ld+json"
-    ):
-        try:
-            data = json.loads(script.string or script.get_text())
-            items = extract_jsonld_items(data)
+    image_url = ""
 
-            for item in items:
-                item_type = item.get("@type", [])
+    image_tag = soup.find(
+        "meta",
+        property="og:image"
+    )
 
-                if isinstance(item_type, str):
-                    item_type = [item_type]
+    if image_tag:
+        image_url = image_tag.get("content", "")
 
-                if not any(
-                    "Event" in str(value)
-                    for value in item_type
-                ):
-                    continue
+    if not image_url:
+        image = soup.find("img", src=True)
+        if image:
+            image_url = image["src"]
 
-                title = clean_text(item.get("name"))
-                description = clean_text(item.get("description"))
+    for element in soup([
+        "script", "style", "nav", "footer",
+        "header", "aside", "form"
+    ]):
+        element.decompose()
 
-                if not title:
-                    continue
+    article = soup.find("article") or soup.find("main")
 
-                event_url = item.get("url") or source["url"]
-                event_url = urljoin(source["url"], event_url)
+    if article is None:
+        article = soup.body
 
-                location = item.get("location", {})
-                if isinstance(location, list):
-                    location = location[0] if location else {}
+    if article is None:
+        return "", image_url
 
-                if isinstance(location, dict):
-                    location = (
-                        location.get("name")
-                        or location.get("address")
-                        or ""
-                    )
+    paragraphs = [
+        clean_text(p.get_text(" ", strip=True))
+        for p in article.find_all(["p", "h2", "h3"])
+    ]
 
-                image_url = extract_image(item.get("image"))
+    content = "\n\n".join(
+        p for p in paragraphs if len(p) > 35
+    )
 
-                start_date = clean_text(item.get("startDate"))
-                event_date = ""
-
-                if start_date:
-                    try:
-                        event_date = datetime.fromisoformat(
-                            start_date.replace("Z", "+00:00")
-                        ).date().isoformat()
-                    except ValueError:
-                        event_date = ""
-
-                articles.append({
-                    "source_name": source["name"],
-                    "source_url": event_url,
-                    "original_title": title,
-                    "original_content": description,
-                    "image_url": urljoin(source["url"], image_url)
-                        if image_url else "",
-                    "image_credit": source["name"] if image_url else "",
-                    "event_date": event_date,
-                    "event_location": clean_text(location),
-                    "category": source.get("category", "Events")
-                })
-
-        except (json.JSONDecodeError, TypeError, ValueError) as error:
-            logger.warning(
-                "Could not parse event structured data from %s: %s",
-                source["name"],
-                error
-            )
-
-    return articles
+    return content[:15000], image_url
 
 
-def collect_wordpress_articles(source):
-    base_url = source["url"].rstrip("/")
-    api_url = base_url + "/wp-json/wp/v2/posts"
-
-    try:
-        response = requests.get(
-            api_url,
-            headers=HEADERS,
-            params={
-                "per_page": MAX_ARTICLES_PER_SOURCE,
-                "_embed": "true"
-            },
-            timeout=TIMEOUT
-        )
-        response.raise_for_status()
-
-        posts = response.json()
-        articles = []
-
-        for post in posts:
-            title = BeautifulSoup(
-                post.get("title", {}).get("rendered", ""),
-                "html.parser"
-            ).get_text(" ", strip=True)
-
-            content = BeautifulSoup(
-                post.get("content", {}).get("rendered", ""),
-                "html.parser"
-            ).get_text("\n\n", strip=True)
-
-            if not title or len(content) < 100:
-                continue
-
-            image_url = ""
-
-            embedded = post.get("_embedded", {})
-            media = embedded.get("wp:featuredmedia", [])
-
-            if media:
-                image_url = media[0].get("source_url", "")
-
-            articles.append({
-                "source_name": source["name"],
-                "source_url": post.get("link", ""),
-                "original_title": title,
-                "original_content": content[:15000],
-                "image_url": image_url,
-                "image_credit": source["name"] if image_url else "",
-                "event_date": "",
-                "event_location": "",
-                "category": source.get("category", "Tourism")
-            })
-
-        return articles
-
-    except (requests.RequestException, ValueError) as error:
-        logger.warning(
-            "WordPress collection failed for %s: %s",
-            source["name"],
-            error
-        )
-        return []
-
-
-def collect_event_source(source):
+def collect_city_hall(source):
     html = fetch_page(source["url"])
 
     if not html:
         return []
 
-    articles = collect_jsonld_events(source, html)
+    soup = BeautifulSoup(html, "html.parser")
+    articles = []
+    seen = set()
 
-    if articles:
-        logger.info(
-            "Found %s structured events from %s",
-            len(articles),
-            source["name"]
+    domain = urlparse(source["url"]).netloc
+
+    for link in soup.find_all("a", href=True):
+        title = clean_text(link.get_text(" ", strip=True))
+        article_url = urljoin(source["url"], link["href"])
+
+        parsed = urlparse(article_url)
+
+        if parsed.netloc != domain:
+            continue
+
+        if len(title) < 20:
+            continue
+
+        if article_url in seen:
+            continue
+
+        if any(
+            path in parsed.path.lower()
+            for path in [
+                "/category/", "/tag/", "/author/",
+                "/wp-content/", "/wp-admin/"
+            ]
+        ):
+            continue
+
+        seen.add(article_url)
+
+        content, image_url = extract_article(article_url)
+
+        if len(content) < 100:
+            continue
+
+        articles.append({
+            "source_name": source["name"],
+            "source_url": article_url,
+            "original_title": title,
+            "original_content": content,
+            "image_url": image_url,
+            "image_credit": source["name"] if image_url else "",
+            "event_date": "",
+            "event_location": "",
+            "category": source.get("category", "Tourism")
+        })
+
+        if len(articles) >= MAX_ARTICLES_PER_SOURCE:
+            break
+
+    return articles
+
+
+def collect_vivo_rio(source):
+    html = fetch_page(source["url"])
+
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    articles = []
+    seen = set()
+
+    for heading in soup.find_all(["h2", "h3"]):
+        title = clean_text(heading.get_text(" ", strip=True))
+
+        if len(title) < 3:
+            continue
+
+        # Find the event card containing this heading.
+        container = heading
+
+        for _ in range(6):
+            if container.parent:
+                container = container.parent
+
+            text = clean_text(container.get_text(" ", strip=True))
+
+            if (
+                len(text) > len(title) + 15
+                and container.find("a", href=True)
+            ):
+                break
+
+        card_text = clean_text(
+            container.get_text(" ", strip=True)
         )
-        return articles[:MAX_ARTICLES_PER_SOURCE]
+
+        # Find the event details link.
+        detail_url = ""
+
+        for link in container.find_all("a", href=True):
+            link_text = clean_text(
+                link.get_text(" ", strip=True)
+            ).lower()
+
+            if "saiba mais" in link_text:
+                detail_url = urljoin(
+                    source["url"],
+                    link["href"]
+                )
+                break
+
+        if not detail_url:
+            continue
+
+        if detail_url in seen:
+            continue
+
+        seen.add(detail_url)
+
+        # Extract the event description from its detail page.
+        content, image_url = extract_article(detail_url)
+
+        if not image_url:
+            image = container.find("img", src=True)
+            if image:
+                image_url = urljoin(
+                    source["url"],
+                    image["src"]
+                )
+
+        # Use the card text if the detail page has little text.
+        if len(content) < 100:
+            content = card_text
+
+        if len(content) < 30:
+            continue
+
+        articles.append({
+            "source_name": source["name"],
+            "source_url": detail_url,
+            "original_title": title,
+            "original_content": content[:15000],
+            "image_url": image_url,
+            "image_credit": source["name"] if image_url else "",
+            "event_date": "",
+            "event_location": "",
+            "category": source.get("category", "Music")
+        })
+
+        if len(articles) >= MAX_ARTICLES_PER_SOURCE:
+            break
+
+    logger.info(
+        "Vivo Rio extractor found %s events",
+        len(articles)
+    )
+
+    return articles
+
+
+def collect_event_source(source):
+    if source["name"] == "Vivo Rio":
+        return collect_vivo_rio(source)
 
     logger.warning(
-        "No structured event data found on %s. "
-        "This source may need a custom extractor.",
+        "Custom extractor not yet implemented for %s",
         source["name"]
     )
 
@@ -257,18 +273,23 @@ def collect_news():
         source_type = source.get("type", "web")
 
         if source_type == "wordpress":
-            articles = collect_wordpress_articles(source)
+            articles = collect_city_hall(source)
 
         elif source_type == "events":
             articles = collect_event_source(source)
 
         else:
             logger.warning(
-                "Unsupported source type '%s' for %s",
-                source_type,
-                source["name"]
+                "Unsupported source type: %s",
+                source_type
             )
             articles = []
+
+        logger.info(
+            "%s: collected %s items",
+            source["name"],
+            len(articles)
+        )
 
         all_articles.extend(articles)
 
