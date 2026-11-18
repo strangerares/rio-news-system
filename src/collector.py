@@ -6,7 +6,7 @@ import re
 import requests
 
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urldefrag
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,8 +15,8 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; RioNewsCollector/1.0)"
 }
 
-MAX_ARTICLES_PER_SOURCE = 15
-TIMEOUT = 25
+MAX_ARTICLES_PER_SOURCE = 8
+TIMEOUT = (5, 12)
 
 
 def load_sources():
@@ -63,8 +63,11 @@ def extract_article(url):
 
     if not image_url:
         image = soup.find("img", src=True)
+
         if image:
             image_url = image["src"]
+
+    image_url = urljoin(url, image_url) if image_url else ""
 
     for element in soup([
         "script", "style", "nav", "footer",
@@ -99,18 +102,58 @@ def collect_city_hall(source):
         return []
 
     soup = BeautifulSoup(html, "html.parser")
+
     articles = []
     seen = set()
 
-    domain = urlparse(source["url"]).netloc
+    source_url = source["url"]
+    domain = urlparse(source_url).netloc
+    homepage_path = urlparse(source_url).path.rstrip("/")
 
-    for link in soup.find_all("a", href=True):
+    excluded_paths = [
+        "/category/",
+        "/categoria/",
+        "/tag/",
+        "/author/",
+        "/page/",
+        "/wp-content/",
+        "/wp-admin/",
+        "/wp-json/",
+        "/feed/",
+        "/search/"
+    ]
+
+    # Prefer links inside actual article cards.
+    article_blocks = soup.find_all("article")
+
+    if article_blocks:
+        candidate_links = []
+
+        for block in article_blocks:
+            candidate_links.extend(
+                block.find_all("a", href=True)
+            )
+    else:
+        candidate_links = soup.find_all("a", href=True)
+
+    for link in candidate_links:
         title = clean_text(link.get_text(" ", strip=True))
-        article_url = urljoin(source["url"], link["href"])
+
+        article_url = urljoin(source_url, link["href"])
+        article_url, _ = urldefrag(article_url)
 
         parsed = urlparse(article_url)
+        path = parsed.path.lower()
 
         if parsed.netloc != domain:
+            continue
+
+        # Do not collect the news homepage itself.
+        if path.rstrip("/") == homepage_path.lower():
+            continue
+
+        # Exclude categories, tags, archives and system pages.
+        if any(item in path for item in excluded_paths):
             continue
 
         if len(title) < 20:
@@ -119,20 +162,13 @@ def collect_city_hall(source):
         if article_url in seen:
             continue
 
-        if any(
-            path in parsed.path.lower()
-            for path in [
-                "/category/", "/tag/", "/author/",
-                "/wp-content/", "/wp-admin/"
-            ]
-        ):
-            continue
-
         seen.add(article_url)
 
         content, image_url = extract_article(article_url)
 
-        if len(content) < 100:
+        # Ignore incomplete snippets and navigation pages.
+        if len(content) < 250:
+            logger.info("Skipping incomplete page: %s", article_url)
             continue
 
         articles.append({
@@ -147,8 +183,15 @@ def collect_city_hall(source):
             "category": source.get("category", "Tourism")
         })
 
+        logger.info("City Hall article found: %s", title)
+
         if len(articles) >= MAX_ARTICLES_PER_SOURCE:
             break
+
+    logger.info(
+        "City Hall extractor found %s articles",
+        len(articles)
+    )
 
     return articles
 
@@ -160,6 +203,7 @@ def collect_vivo_rio(source):
         return []
 
     soup = BeautifulSoup(html, "html.parser")
+
     articles = []
     seen = set()
 
@@ -169,7 +213,7 @@ def collect_vivo_rio(source):
         if len(title) < 3:
             continue
 
-        # Find the event card containing this heading.
+        # Find the event card containing the heading.
         container = heading
 
         for _ in range(6):
@@ -188,7 +232,6 @@ def collect_vivo_rio(source):
             container.get_text(" ", strip=True)
         )
 
-        # Find the event details link.
         detail_url = ""
 
         for link in container.find_all("a", href=True):
@@ -206,23 +249,24 @@ def collect_vivo_rio(source):
         if not detail_url:
             continue
 
+        detail_url, _ = urldefrag(detail_url)
+
         if detail_url in seen:
             continue
 
         seen.add(detail_url)
 
-        # Extract the event description from its detail page.
         content, image_url = extract_article(detail_url)
 
         if not image_url:
             image = container.find("img", src=True)
+
             if image:
                 image_url = urljoin(
                     source["url"],
                     image["src"]
                 )
 
-        # Use the card text if the detail page has little text.
         if len(content) < 100:
             content = card_text
 
@@ -240,6 +284,8 @@ def collect_vivo_rio(source):
             "event_location": "",
             "category": source.get("category", "Music")
         })
+
+        logger.info("Vivo Rio event found: %s", title)
 
         if len(articles) >= MAX_ARTICLES_PER_SOURCE:
             break
