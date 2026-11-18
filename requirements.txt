@@ -1,0 +1,6 @@
+google-genai
+supabase
+requests
+feedparser
+beautifulsoup4
+python-dateutil
