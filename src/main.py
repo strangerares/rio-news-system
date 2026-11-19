@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 def main():
     logger.info("Starting Rio News Collector")
 
-    # STEP 1: Collect new events.
+    # STEP 1: Collect new events and news.
     articles = collect_news()
 
     logger.info("Collected %s events", len(articles))
@@ -25,7 +25,7 @@ def main():
     saved = 0
     duplicates = 0
 
-    # STEP 2: Save original events before using Gemini.
+    # STEP 2: Save original information before AI processing.
     for article in articles:
         source_url = article.get("source_url", "")
 
@@ -40,13 +40,16 @@ def main():
     logger.info("New original events saved: %s", saved)
     logger.info("Duplicates skipped: %s", duplicates)
 
-    # STEP 3: Retrieve all pending events without AI content.
+    # STEP 3: Retrieve events waiting for AI processing.
     pending_articles = get_unprocessed_articles()
 
-    processed = 0
+    published = 0
+    rejected = 0
+    needs_review = 0
+    failed = 0
     quota_exhausted = False
 
-    # STEP 4: Process pending events with Gemini.
+    # STEP 4: Process each article with Gemini.
     for article in pending_articles:
         source_url = article.get("source_url", "")
 
@@ -56,30 +59,58 @@ def main():
         except GeminiQuotaExceeded:
             logger.error(
                 "Gemini quota exhausted. "
-                "Remaining events will stay saved for later processing."
+                "Remaining articles will stay pending."
             )
             quota_exhausted = True
             break
 
         if result is None:
             logger.warning(
-                "Gemini did not process this event: %s",
+                "AI processing failed. Article remains pending: %s",
                 source_url
             )
+            failed += 1
             continue
 
-        # STEP 5: Update the existing Supabase record.
-        if update_article(source_url, result):
-            processed += 1
+        decision = result.get("decision")
 
-    logger.info("News collection completed")
-    logger.info("Events saved: %s", saved)
-    logger.info("Events processed by Gemini: %s", processed)
+        # STEP 5: Apply Gemini's editorial decision.
+        if update_article(source_url, result):
+
+            if decision == "publish":
+                published += 1
+
+            elif decision == "reject":
+                rejected += 1
+
+            elif decision == "pending":
+                needs_review += 1
+
+        else:
+            logger.error(
+                "Could not update article in Supabase: %s",
+                source_url
+            )
+            failed += 1
+
+    # STEP 6: Report results.
+    logger.info("===================================")
+    logger.info("RIO NEWS COLLECTOR - FINAL REPORT")
+    logger.info("===================================")
+    logger.info("New events saved: %s", saved)
+    logger.info("Duplicates skipped: %s", duplicates)
+    logger.info("Automatically published: %s", published)
+    logger.info("Rejected: %s", rejected)
+    logger.info("Held for review: %s", needs_review)
+    logger.info("Processing failures: %s", failed)
 
     if quota_exhausted:
         logger.warning(
-            "Some events remain pending and can be processed in a future run."
+            "Some articles remain pending because Gemini's quota "
+            "was exhausted."
         )
+
+    logger.info("News collection completed.")
 
 
 if __name__ == "__main__":
