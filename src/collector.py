@@ -131,115 +131,108 @@ def is_cancelled(text):
     return any(term in normalized for term in CANCELLED_TERMS)
 
 
+
 def extract_date(text):
-    """
-    Extract dates and return YYYY-MM-DD.
+    """Extract a clearly identified event date, never a ticket-sale date."""
 
-    Dates without a year are assigned to the next upcoming
-    occurrence. This is useful for event calendars.
-    """
+    if not text:
+        return ""
 
-    text = clean_text(text).lower()
+    text = re.sub(r"\s+", " ", text).strip().lower()
 
-    # DD/MM/YYYY or DD-MM-YYYY
-    match = re.search(
-        r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b",
-        text,
-    )
+    today = datetime.now().date()
 
-    if match:
-        day, month, year = map(int, match.groups())
-        try:
-            return date(year, month, day).isoformat()
-        except ValueError:
-            pass
-
-    # YYYY-MM-DD
-    match = re.search(
-        r"\b(20\d{2})-(\d{2})-(\d{2})\b",
-        text,
-    )
-
-    if match:
-        try:
-            return date.fromisoformat(match.group(0)).isoformat()
-        except ValueError:
-            pass
-
-    # Portuguese: 19 de novembro de 2026
-    match = re.search(
-        r"\b(\d{1,2})\s+de\s+"
-        r"(janeiro|fevereiro|março|marco|abril|maio|junho|"
-        r"julho|agosto|setembro|outubro|novembro|dezembro)"
-        r"\s+de\s+(20\d{2})\b",
-        text,
-    )
-
-    if match:
-        day_number = int(match.group(1))
-        month_number = PORTUGUESE_MONTHS[match.group(2)]
-        year_number = int(match.group(3))
-
-        try:
-            return date(
-                year_number, month_number, day_number
-            ).isoformat()
-        except ValueError:
-            pass
-
-    # Portuguese: 19 de novembro
-    match = re.search(
-        r"\b(\d{1,2})\s+de\s+"
-        r"(janeiro|fevereiro|março|marco|abril|maio|junho|"
-        r"julho|agosto|setembro|outubro|novembro|dezembro)\b",
-        text,
-    )
-
-    if match:
-        day_number = int(match.group(1))
-        month_number = PORTUGUESE_MONTHS[match.group(2)]
-        today = date.today()
-
-        for year_number in (today.year, today.year + 1):
-            try:
-                candidate = date(
-                    year_number, month_number, day_number
-                )
-                if candidate >= today:
-                    return candidate.isoformat()
-            except ValueError:
-                continue
-
-    # Short calendar format: 19 | nov
-    match = re.search(
-        r"\b(\d{1,2})\s*[|/]\s*"
-        r"(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\b",
-        text,
-    )
-
-    short_months = {
-        "jan": 1, "fev": 2, "mar": 3, "abr": 4,
-        "mai": 5, "jun": 6, "jul": 7, "ago": 8,
-        "set": 9, "out": 10, "nov": 11, "dez": 12,
+    months = {
+        "janeiro": 1,
+        "fevereiro": 2,
+        "março": 3,
+        "marco": 3,
+        "abril": 4,
+        "maio": 5,
+        "junho": 6,
+        "julho": 7,
+        "agosto": 8,
+        "setembro": 9,
+        "outubro": 10,
+        "novembro": 11,
+        "dezembro": 12,
     }
 
-    if match:
-        day_number = int(match.group(1))
-        month_number = short_months[match.group(2)]
-        today = date.today()
+    sale_terms = (
+        "pré-venda",
+        "pre-venda",
+        "pre venda",
+        "venda de ingressos",
+        "vendas de ingressos",
+        "ingressos à venda",
+        "ingressos a venda",
+        "compra de ingressos",
+        "comprar ingressos",
+        "bilheteria",
+        "abertura das vendas",
+        "início das vendas",
+        "inicio das vendas",
+    )
 
-        for year_number in (today.year, today.year + 1):
-            try:
-                candidate = date(
-                    year_number, month_number, day_number
-                )
-                if candidate >= today:
-                    return candidate.isoformat()
-            except ValueError:
-                continue
+    event_terms = (
+        "no dia",
+        "dia ",
+        "acontece em",
+        "acontecerá em",
+        "acontecera em",
+        "será realizado em",
+        "sera realizado em",
+        "apresentação será",
+        "apresentacao sera",
+        "show será",
+        "show sera",
+        "shows acontecem",
+    )
+
+    pattern = (
+        r"\b(?:dia\s+)?(\d{1,2})\s+de\s+"
+        r"(janeiro|fevereiro|março|marco|abril|maio|"
+        r"junho|julho|agosto|setembro|outubro|novembro|dezembro)"
+        r"(?:\s+de\s+(\d{4}))?\b"
+    )
+
+    for match in re.finditer(pattern, text):
+        day = int(match.group(1))
+        month_name = match.group(2)
+        year_text = match.group(3)
+
+        month = months[month_name]
+
+        start = max(0, match.start() - 90)
+        end = min(len(text), match.end() + 90)
+        context = text[start:end]
+
+        # Never interpret a ticket-sale date as an event date.
+        if any(term in context for term in sale_terms):
+            continue
+
+        # Require language indicating an actual event date.
+        if not any(term in context for term in event_terms):
+            continue
+
+        if year_text:
+            year = int(year_text)
+        else:
+            year = today.year
+
+        try:
+            event_date = datetime(year, month, day).date()
+        except ValueError:
+            continue
+
+        # If the date has no explicit year and has already passed,
+        # do not automatically assume it belongs to next year.
+        if not year_text and event_date < today:
+            continue
+
+        return event_date.isoformat()
 
     return ""
-
 
 def extract_location(text):
     text = clean_text(text)
