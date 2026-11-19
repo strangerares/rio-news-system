@@ -60,10 +60,10 @@ HEADERS = {
 }
 
 TIMEOUT = (8, 25)
-ROBOTS_TIMEOUT = (4, 6)          # short — robots.txt must not block the run
+ROBOTS_TIMEOUT = (4, 6)
 MAX_ARTICLES_PER_SOURCE = 12
 MIN_CONTENT_LENGTH = 45
-MIN_EVENT_CONTENT_LENGTH = 120   # events need real content, not chrome
+MIN_EVENT_CONTENT_LENGTH = 120
 REQUEST_DELAY = 0.8
 
 EXCLUDED_PATHS = (
@@ -112,7 +112,6 @@ DEFAULT_LOCATION = {
     "Qualistage": "Qualistage",
 }
 
-# Exact class / id tokens that unambiguously mean navigation.
 BOILERPLATE_CLASS_TOKENS = frozenset({
     "navbar",
     "menu",
@@ -134,7 +133,6 @@ BOILERPLATE_CLASS_TOKENS = frozenset({
 BOILERPLATE_TAGS = ("nav", "header", "footer")
 CONTENT_TAGS = ("main", "article")
 
-# First-line words that are never artist names.
 ARTIST_BLACKLIST = frozenset({
     "SHOW", "EVENTO", "EVENTOS", "INGRESSO", "INGRESSOS",
     "DIA", "HOJE", "AMANHA", "AMANHÃ",
@@ -154,7 +152,6 @@ MONTHS = {
 # HTTP SESSIONS
 # ---------------------------------------------------------
 
-# Main session: retries, backoff, generous timeout.
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
@@ -178,17 +175,11 @@ adapter = HTTPAdapter(
 SESSION.mount("http://", adapter)
 SESSION.mount("https://", adapter)
 
-# Robots session: no retries, short timeout, fail fast.
-# Repeated 25s timeouts on robots.txt used to consume ~2.5 minutes
-# per run. We only need to know "is it there or not?" — one try.
 ROBOTS_SESSION = requests.Session()
 ROBOTS_SESSION.headers.update({"User-Agent": HEADERS["User-Agent"]})
 
 ROBOTS_CACHE = {}
 LAST_REQUEST_TIME = {}
-
-# Hosts that have already returned 403 in this run. Once a host is
-# blocked, skip all further requests to it — no point retrying.
 BLOCKED_HOSTS = set()
 
 
@@ -274,6 +265,10 @@ def clean_content(value):
 
 
 def normalize_url(url, base_url):
+    """
+    Normalize a page URL. Rejects image file extensions, because
+    page URLs should never point directly at an image.
+    """
     if not url:
         return ""
 
@@ -287,6 +282,24 @@ def normalize_url(url, base_url):
     if parsed.path.lower().endswith(
         (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg")
     ):
+        return ""
+
+    return url
+
+
+def normalize_image_url(url, base_url):
+    """
+    Normalize an image URL. Unlike normalize_url, this permits
+    image file extensions (.jpg, .png, …) — they're the whole point.
+    """
+    if not url:
+        return ""
+
+    url = urljoin(base_url, str(url).strip())
+    url, _ = urldefrag(url)
+    parsed = urlparse(url)
+
+    if parsed.scheme not in ("http", "https"):
         return ""
 
     return url
@@ -418,6 +431,7 @@ def _parse_srcset(srcset):
     entries.sort(key=lambda item: item[0])
     return entries[-1][1] if entries else ""
 
+
 def _extract_css_url(style):
     """
     Extract a URL from a CSS declaration containing url(...).
@@ -428,7 +442,6 @@ def _extract_css_url(style):
     if not style or "url(" not in style.lower():
         return ""
 
-    # Quoted — most reliable.
     match = re.search(r'url\(\s*"([^"]+)"\s*\)', style)
     if match:
         return match.group(1)
@@ -437,9 +450,6 @@ def _extract_css_url(style):
     if match:
         return match.group(1)
 
-    # Unquoted — grab from url( up to the LAST ) before ; or end.
-    # Filenames like "CARD (13).jpg" contain internal parens that
-    # must not truncate the match.
     match = re.search(
         r"url\(\s*([^;]+?)\s*\)\s*(?:;|$)",
         style,
@@ -457,48 +467,48 @@ def _extract_css_url(style):
         return match.group(1).strip().strip('"').strip("'")
 
     return ""
-    
+
+
 def extract_image(container, base_url):
     if not container:
         return ""
 
-    # 1. Video posters (some event pages use <video> posters).
+    # 1. Video posters.
     for video in container.find_all("video"):
         poster = video.get("poster")
         if poster:
-            result = normalize_url(poster, base_url)
+            result = normalize_image_url(poster, base_url)
             if result:
                 return result
 
-    # 2. <source> tags inside <picture> (often higher-quality than <img>).
+    # 2. <source> tags inside <picture>.
     for source in container.find_all("source"):
         for attr in ("srcset", "data-srcset"):
             srcset = source.get(attr)
             if srcset:
                 widest = _parse_srcset(srcset)
                 if widest:
-                    result = normalize_url(widest, base_url)
+                    result = normalize_image_url(widest, base_url)
                     if result:
                         return result
 
-       # 3. Inline / lazy CSS background — catches background-image AND
-    # the background shorthand (both are used on Qualistage cards).
+    # 3. Inline / lazy CSS background (background-image or shorthand).
     for styled in container.find_all(style=True):
         style = styled.get("style") or ""
         if "url(" not in style.lower():
             continue
         css_url = _extract_css_url(style)
         if css_url:
-            result = normalize_url(css_url, base_url)
+            result = normalize_image_url(css_url, base_url)
             if result:
                 return result
 
-    # 4. data-background / data-bg attributes (common on lazy-loaders).
+    # 4. data-background / data-bg / data-background-image attributes.
     for el in container.find_all(attrs=True):
         for attr in ("data-background", "data-bg", "data-background-image"):
             value = el.get(attr)
             if value and isinstance(value, str) and "url(" not in value:
-                result = normalize_url(value, base_url)
+                result = normalize_image_url(value, base_url)
                 if result:
                     return result
 
@@ -520,7 +530,7 @@ def extract_image(container, base_url):
 
         for candidate in candidates:
             if candidate and not candidate.startswith("data:"):
-                result = normalize_url(candidate, base_url)
+                result = normalize_image_url(candidate, base_url)
                 if result:
                     return result
 
@@ -531,9 +541,8 @@ def extract_card_image(card, base_url, max_levels_up=4):
     """
     Try the card, then walk up parents.
 
-    Walks 4 levels now (was 2) because event listing sites often
-    place posters on a wrapper ancestor rather than inside the
-    smallest heading container.
+    Event listing sites often place posters on a wrapper ancestor
+    rather than inside the smallest heading container.
     """
     if not card:
         return ""
@@ -564,7 +573,7 @@ def extract_page_image(soup, page_url):
             or soup.find("meta", attrs={"name": key})
         )
         if tag and tag.get("content"):
-            return normalize_url(tag["content"], page_url)
+            return normalize_image_url(tag["content"], page_url)
 
     return ""
 
@@ -636,7 +645,6 @@ def extract_date(text, event_calendar=False):
             and not is_publication_context(match)
         )
 
-    # DD/MM/YYYY or DD-MM-YYYY
     for match in re.finditer(
         r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b",
         normalized,
@@ -652,7 +660,6 @@ def extract_date(text, event_calendar=False):
         except ValueError:
             continue
 
-    # YYYY-MM-DD
     for match in re.finditer(r"\b20\d{2}-\d{2}-\d{2}\b", normalized):
         if not usable(match):
             continue
@@ -661,7 +668,6 @@ def extract_date(text, event_calendar=False):
         except ValueError:
             continue
 
-    # Portuguese long form: 16 de fevereiro de 2027
     pattern = (
         r"\b(?:dia\s+)?(\d{1,2})\s+de\s+"
         r"(janeiro|fevereiro|março|marco|abril|maio|junho|"
@@ -700,8 +706,6 @@ def extract_date(text, event_calendar=False):
 
         return candidate.isoformat()
 
-    # Compact calendar form — 3 variants:
-    #   20 | jan   /   20/jan   /   20 jan
     short_patterns = (
         r"\b(\d{1,2})\s*[|/]\s*"
         r"(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\b",
@@ -740,11 +744,6 @@ def extract_date(text, event_calendar=False):
 
 
 def extract_date_from_time_tags(container):
-    """
-    Extract a date from <time datetime="..."> or <time>text</time>.
-
-    The datetime attribute is authoritative when present.
-    """
     if not container:
         return ""
 
@@ -767,15 +766,6 @@ def extract_date_from_time_tags(container):
 
 
 def extract_event_date(card, content, event_calendar=True):
-    """
-    Try card → up to 2 parents → content for a date.
-
-    Date badges are often siblings of the card inside a shared
-    wrapper, so checking only the card misses them. We walk up
-    two levels and stop if a parent looks like page chrome
-    (more than 6 headings = a list page, not an event card).
-    Both <time> elements and free text are examined at each level.
-    """
     if not card:
         return extract_date(content or "", event_calendar=event_calendar)
 
@@ -816,6 +806,7 @@ def extract_event_date(card, content, event_calendar=True):
         parent = parent.parent
 
     return extract_date(content or "", event_calendar=event_calendar)
+
 
 # ---------------------------------------------------------
 # ARTICLE EXTRACTION
@@ -925,8 +916,6 @@ def build_article(
         logger.info("Skipping short item: %s", title)
         return None
 
-    # Event sources need real content, not just chrome like
-    # "SEAL | (8) Descrição ingressos sobre o evento".
     if (
         source.get("type") == "events"
         and len(content) < MIN_EVENT_CONTENT_LENGTH
@@ -1011,7 +1000,7 @@ def extract_jsonld_events(soup, source):
             if isinstance(image, dict):
                 image = image.get("url", "")
 
-            image_url = normalize_url(image, source["url"])
+            image_url = normalize_image_url(image, source["url"])
 
             start_date = clean_text(value.get("startDate", ""))
             event_date = ""
@@ -1309,12 +1298,6 @@ def _looks_like_subtitle(text):
 
 
 def _extract_artist_from_content(content):
-    """
-    If content's first non-empty line is a short ALL-CAPS name,
-    treat it as the artist. Covers layouts where the H2 holds
-    the show name and the artist appears above the description
-    as a bold uppercase word (e.g. TARJA).
-    """
     if not content:
         return ""
 
@@ -1412,10 +1395,6 @@ def collect_vivo_rio(source):
 
         image_url = image_url or extract_card_image(card, source["url"])
 
-        # Title construction — try three strategies in order:
-        # 1. ALL-CAPS artist at the top of the content.
-        # 2. Subtitle heuristics + detail page H1.
-        # 3. Heading + subtitle.
         content_artist = _extract_artist_from_content(content)
 
         if (
@@ -1527,9 +1506,6 @@ def collect_qualistage(source):
             continue
         seen.add(key)
 
-        # Try fetching the ticket detail page (image, content, date).
-        # On many hosts this will fail (403, robots.txt timeout) —
-        # the caller will fall back to card data, which is fine.
         detail_content, detail_image, _ = extract_article(detail_url)
 
         content = (
@@ -1626,7 +1602,7 @@ def collect_city_hall(source):
                 media = embedded.get("wp:featuredmedia", [])
 
                 if media:
-                    image_url = normalize_url(
+                    image_url = normalize_image_url(
                         media[0].get("source_url", ""),
                         source["url"],
                     )
@@ -1646,7 +1622,7 @@ def collect_city_hall(source):
                 article = build_article(
                     source, title, detail_url, content,
                     image_url,
-                    "",  # news, not events
+                    "",
                     extract_location(content),
                 )
 
