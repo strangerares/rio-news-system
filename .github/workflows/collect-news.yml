@@ -1,5 +1,5 @@
 
-name: Rio News Collector
+name: Rio News Collector - Test
 
 on:
   workflow_dispatch:
@@ -25,9 +25,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run news collector
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: python src/main.py
+      - name: Test news collector only
+        run: python src/collector.py
