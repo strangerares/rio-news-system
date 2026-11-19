@@ -131,32 +131,22 @@ def is_cancelled(text):
     return any(term in normalized for term in CANCELLED_TERMS)
 
 
-
 def extract_date(text):
-    """Extract a clearly identified event date, never a ticket-sale date."""
+    """
+    Extract dates in YYYY-MM-DD format.
+
+    Supports numeric dates, ISO dates, Portuguese month names,
+    and short calendar formats.
+
+    Rejects dates associated with ticket sales and presales.
+    Does not guess a future year for dates without one.
+    """
 
     if not text:
         return ""
 
-    text = re.sub(r"\s+", " ", text).strip().lower()
-
-    today = datetime.now().date()
-
-    months = {
-        "janeiro": 1,
-        "fevereiro": 2,
-        "março": 3,
-        "marco": 3,
-        "abril": 4,
-        "maio": 5,
-        "junho": 6,
-        "julho": 7,
-        "agosto": 8,
-        "setembro": 9,
-        "outubro": 10,
-        "novembro": 11,
-        "dezembro": 12,
-    }
+    text = clean_text(text).lower()
+    today = date.today()
 
     sale_terms = (
         "pré-venda",
@@ -177,62 +167,129 @@ def extract_date(text):
     event_terms = (
         "no dia",
         "dia ",
-        "acontece em",
-        "acontecerá em",
-        "acontecera em",
-        "será realizado em",
-        "sera realizado em",
+        "acontece",
+        "acontecerá",
+        "acontecera",
+        "será realizado",
+        "sera realizado",
         "apresentação será",
         "apresentacao sera",
         "show será",
         "show sera",
-        "shows acontecem",
+        "data do evento",
+        "data da apresentação",
+        "data da apresentacao",
     )
 
-    pattern = (
+    def is_sale_context(match):
+        start = max(0, match.start() - 100)
+        end = min(len(text), match.end() + 100)
+        context = text[start:end]
+
+        return any(term in context for term in sale_terms)
+
+    # DD/MM/YYYY or DD-MM-YYYY
+    match = re.search(
+        r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b",
+        text,
+    )
+
+    if match and not is_sale_context(match):
+        day_number, month_number, year_number = map(
+            int, match.groups()
+        )
+
+        try:
+            return date(
+                year_number, month_number, day_number
+            ).isoformat()
+        except ValueError:
+            pass
+
+    # YYYY-MM-DD
+    match = re.search(
+        r"\b(20\d{2})-(\d{2})-(\d{2})\b",
+        text,
+    )
+
+    if match and not is_sale_context(match):
+        try:
+            return date.fromisoformat(
+                match.group(0)
+            ).isoformat()
+        except ValueError:
+            pass
+
+    # Portuguese: 19 de novembro de 2026
+    # or 19 de novembro
+    portuguese_pattern = (
         r"\b(?:dia\s+)?(\d{1,2})\s+de\s+"
         r"(janeiro|fevereiro|março|marco|abril|maio|"
         r"junho|julho|agosto|setembro|outubro|novembro|dezembro)"
-        r"(?:\s+de\s+(\d{4}))?\b"
+        r"(?:\s+de\s+(20\d{2}))?\b"
     )
 
-    for match in re.finditer(pattern, text):
-        day = int(match.group(1))
-        month_name = match.group(2)
-        year_text = match.group(3)
-
-        month = months[month_name]
-
-        start = max(0, match.start() - 90)
-        end = min(len(text), match.end() + 90)
-        context = text[start:end]
-
-        # Never interpret a ticket-sale date as an event date.
-        if any(term in context for term in sale_terms):
+    for match in re.finditer(portuguese_pattern, text):
+        if is_sale_context(match):
             continue
 
-        # Require language indicating an actual event date.
+        start = max(0, match.start() - 100)
+        end = min(len(text), match.end() + 100)
+        context = text[start:end]
+
         if not any(term in context for term in event_terms):
             continue
 
-        if year_text:
-            year = int(year_text)
-        else:
-            year = today.year
+        day_number = int(match.group(1))
+        month_name = match.group(2)
+        year_text = match.group(3)
+
+        month_number = PORTUGUESE_MONTHS[month_name]
+        year_number = int(year_text) if year_text else today.year
 
         try:
-            event_date = datetime(year, month, day).date()
+            candidate = date(
+                year_number, month_number, day_number
+            )
         except ValueError:
             continue
 
-        # If the date has no explicit year and has already passed,
-        # do not automatically assume it belongs to next year.
-        if not year_text and event_date < today:
+        if not year_text and candidate < today:
             continue
 
-        return event_date.isoformat()
+        return candidate.isoformat()
+
+    # Short calendar format: 19 | nov or 19 / nov
+    short_pattern = (
+        r"\b(\d{1,2})\s*[|/]\s*"
+        r"(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\b"
+    )
+
+    short_months = {
+        "jan": 1, "fev": 2, "mar": 3, "abr": 4,
+        "mai": 5, "jun": 6, "jul": 7, "ago": 8,
+        "set": 9, "out": 10, "nov": 11, "dez": 12,
+    }
+
+    match = re.search(short_pattern, text)
+
+    if match and not is_sale_context(match):
+        day_number = int(match.group(1))
+        month_number = short_months[match.group(2)]
+
+        try:
+            candidate = date(
+                today.year, month_number, day_number
+            )
+
+            if candidate >= today:
+                return candidate.isoformat()
+
+        except ValueError:
+            pass
 
     return ""
+
 
 def extract_location(text):
     text = clean_text(text)
