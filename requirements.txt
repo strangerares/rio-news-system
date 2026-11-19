@@ -6,3 +6,4 @@ beautifulsoup4
 python-dateutil
 trafilatura
 lxml
+deep-translator
