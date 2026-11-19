@@ -1,1 +1,300 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rio Tips | News & Events</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #f5f7fa;
+      color: #202938;
+      font-family: Arial, sans-serif;
+    }
+
+    .container {
+      max-width: 1150px;
+      margin: auto;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    .header h1 {
+      margin: 0 0 8px;
+      font-size: 32px;
+      color: #123b5d;
+    }
+
+    .header p {
+      color: #64748b;
+      margin: 0;
+    }
+
+    .toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+
+    #status {
+      color: #64748b;
+      font-size: 14px;
+    }
+
+    button {
+      cursor: pointer;
+      border: 0;
+      border-radius: 7px;
+      padding: 10px 16px;
+      background: #087e8b;
+      color: white;
+      font-weight: bold;
+    }
+
+    button:hover { background: #066773; }
+
+    .news-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 22px;
+    }
+
+    .card {
+      background: white;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 3px 14px rgba(0,0,0,.07);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .card img {
+      width: 100%;
+      height: 190px;
+      object-fit: cover;
+      background: #e2e8f0;
+    }
+
+    .card-content {
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+    }
+
+    .category {
+      color: #087e8b;
+      text-transform: uppercase;
+      font-size: 11px;
+      font-weight: bold;
+      letter-spacing: .7px;
+      margin-bottom: 9px;
+    }
+
+    .card h2 {
+      font-size: 19px;
+      line-height: 1.35;
+      margin: 0 0 10px;
+      color: #18344d;
+    }
+
+    .meta {
+      font-size: 12px;
+      color: #718096;
+      margin-bottom: 12px;
+    }
+
+    .summary {
+      font-size: 14px;
+      line-height: 1.6;
+      color: #4b5563;
+      margin: 0 0 16px;
+    }
+
+    .article-body {
+      display: none;
+      white-space: pre-line;
+      font-size: 14px;
+      line-height: 1.7;
+      color: #374151;
+      margin-bottom: 16px;
+    }
+
+    .article-body.open { display: block; }
+
+    .read-more {
+      margin-top: auto;
+      align-self: flex-start;
+    }
+
+    .empty {
+      grid-column: 1 / -1;
+      text-align: center;
+      padding: 45px 20px;
+      background: white;
+      border-radius: 12px;
+      color: #64748b;
+    }
+
+    @media (max-width: 850px) {
+      .news-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 580px) {
+      body { padding: 16px; }
+      .news-grid { grid-template-columns: 1fr; }
+      .header h1 { font-size: 27px; }
+    }
+  </style>
+</head>
+
+<body>
+  <main class="container">
+    <header class="header">
+      <h1>RIO TIPS</h1>
+      <p>What's happening in Rio de Janeiro</p>
+    </header>
+
+    <div class="toolbar">
+      <span id="status">Loading the latest news...</span>
+      <button id="refresh-button" type="button">Refresh</button>
+    </div>
+
+    <section id="news-grid" class="news-grid" aria-live="polite"></section>
+  </main>
+
+  <script>
+    const SUPABASE_URL = "https://gbrbakxybodxprcnfpxi.supabase.co";
+    const SUPABASE_PUBLISHABLE_KEY =
+      "sb_publishable_dFAXSPj_Xy5KhiPqVS1mag_pH8ph2ad";
+
+    const supabaseClient = window.supabase.createClient(
+      SUPABASE_URL,
+      SUPABASE_PUBLISHABLE_KEY
+    );
+
+    const grid = document.getElementById("news-grid");
+    const statusText = document.getElementById("status");
+    const refreshButton = document.getElementById("refresh-button");
+
+    function formatDate(value) {
+      if (!value) return "";
+      const date = new Date(value + (value.length === 10 ? "T12:00:00" : ""));
+      if (Number.isNaN(date.getTime())) return "";
+      return date.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric"
+      });
+    }
+
+    function addText(parent, tag, className, value) {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      element.textContent = value || "";
+      parent.appendChild(element);
+      return element;
+    }
+
+    function createCard(article) {
+      const card = document.createElement("article");
+      card.className = "card";
+
+      if (article.image_url) {
+        const image = document.createElement("img");
+        image.src = article.image_url;
+        image.alt = article.headline || "Rio de Janeiro news";
+        image.loading = "lazy";
+        image.onerror = () => image.remove();
+        card.appendChild(image);
+      }
+
+      const content = document.createElement("div");
+      content.className = "card-content";
+
+      addText(content, "div", "category", article.category || "Rio News");
+      addText(content, "h2", "", article.headline || "Rio News");
+
+      const details = [
+        formatDate(article.event_date || article.published_at),
+        article.event_location
+      ].filter(Boolean).join(" · ");
+
+      if (details) addText(content, "div", "meta", details);
+
+      if (article.summary) {
+        addText(content, "p", "summary", article.summary);
+      }
+
+      if (article.article_content) {
+        const body = addText(content, "div", "article-body", article.article_content);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "read-more";
+        button.textContent = "Read more";
+
+        button.addEventListener("click", () => {
+          const isOpen = body.classList.toggle("open");
+          button.textContent = isOpen ? "Show less" : "Read more";
+        });
+
+        content.appendChild(button);
+      }
+
+      card.appendChild(content);
+      return card;
+    }
+
+    async function loadNews() {
+      refreshButton.disabled = true;
+      statusText.textContent = "Loading news...";
+      grid.replaceChildren();
+
+      const { data, error } = await supabaseClient
+        .from("news_articles")
+        .select(
+          "id, headline, summary, article_content, category, image_url, image_credit, event_date, event_location, published_at, source_name"
+        )
+        .eq("status", "published")
+        .order("published_at", { ascending: false, nullsFirst: false })
+        .limit(30);
+
+      refreshButton.disabled = false;
+
+      if (error) {
+        console.error("Supabase error:", error);
+        statusText.textContent = "Unable to load news. Please try again later.";
+        return;
+      }
+
+      if (!data || data.length === 0) {
+        statusText.textContent = "No published articles available yet.";
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "New Rio news and events will appear here soon.";
+        grid.appendChild(empty);
+        return;
+      }
+
+      data.forEach(article => grid.appendChild(createCard(article)));
+      statusText.textContent = `${data.length} latest articles`;
+    }
+
+    refreshButton.addEventListener("click", loadNews);
+    loadNews();
+  </script>
+</body>
+</html>
+
