@@ -929,9 +929,23 @@ def build_article(
         "apresentacao cancelada",
     )
 
+    firewall_terms = (
+        "your request was denied",
+        "access denied",
+        "403 forbidden",
+        "support id:",
+        "cloudflare",
+        "enable javascript and cookies to continue",
+    )
+
     combined = (title + " " + content).lower()
+
     if any(t in combined for t in cancellation_terms):
         logger.info("Skipping cancelled item: %s", title)
+        return None
+        
+    if any(t in combined for t in firewall_terms):
+        logger.warning("Skipping WAF block page: %s", title)
         return None
 
     final_category = (
