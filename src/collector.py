@@ -88,6 +88,49 @@ TRACKING_PARAMS = {
     "_gl",
 }
 
+# Map URL path segments to useful categories for news sites.
+CATEGORY_BY_PATH = {
+    "saude": "Health",
+    "saúde": "Health",
+    "ordem-publica": "Public Order",
+    "ordem-pública": "Public Order",
+    "forca-municipal": "Public Order",
+    "força-municipal": "Public Order",
+    "cidade": "City",
+    "cet-rio": "Transport",
+    "rioluz": "Infrastructure",
+    "turismo": "Tourism",
+    "riotur": "Tourism",
+    "cultura": "Culture",
+    "educacao": "Education",
+    "educação": "Education",
+    "procurador-do-municipio": "Finance",
+    "mobilidade": "Transport",
+}
+
+# Fallback locations for known event venues.
+DEFAULT_LOCATION = {
+    "Vivo Rio": "Vivo Rio",
+    "Qualistage": "Qualistage",
+}
+
+# HTML tag names that indicate navigation / boilerplate.
+BOILERPLATE_TAGS = {"nav", "header", "footer", "aside"}
+
+# Class / id substrings that indicate navigation / boilerplate.
+BOILERPLATE_CLASS_WORDS = (
+    "menu",
+    "navbar",
+    "navigation",
+    "breadcrumb",
+    "sidebar",
+    "site-header",
+    "site-footer",
+    "topbar",
+    "top-bar",
+    "masthead",
+)
+
 MONTHS = {
     "janeiro": 1,
     "fevereiro": 2,
@@ -322,6 +365,23 @@ def is_excluded_url(url):
     return any(part in path for part in EXCLUDED_PATHS)
 
 
+def derive_category(url, default=None):
+    """
+    Derive a category from a URL path segment.
+
+    Returns None if no matching segment exists, so callers can
+    fall back to a source-level default.
+    """
+
+    path = urlparse(url).path.lower()
+
+    for segment in path.split("/"):
+        if segment in CATEGORY_BY_PATH:
+            return CATEGORY_BY_PATH[segment]
+
+    return default
+
+
 # ---------------------------------------------------------
 # HTTP AND HTML FETCHING
 # ---------------------------------------------------------
@@ -391,6 +451,30 @@ def extract_image(container, base_url):
     if not container:
         return ""
 
+    # 1. background-image on any child element (carousel slides,
+    #    hero images, etc. often use CSS background-image).
+    for styled in container.find_all(style=True):
+        style = styled.get("style") or ""
+
+        if "background-image" not in style.lower():
+            continue
+
+        match = re.search(
+            r'url\(\s*["\']?([^"\')]+)',
+            style,
+            re.IGNORECASE,
+        )
+
+        if match:
+            result = normalize_url(
+                match.group(1),
+                base_url,
+            )
+
+            if result:
+                return result
+
+    # 2. <img> elements with srcset / data-src / src.
     for image in container.find_all("img"):
 
         candidates = [
@@ -513,6 +597,9 @@ def extract_date(text, event_calendar=False):
     """
     Extract an explicitly stated date.
 
+    Publication dates ("Published on ...") are ignored so news
+    articles do not report their publication date as an event date.
+
     Normal article dates are not automatically moved
     into the following year.
 
@@ -542,6 +629,18 @@ def extract_date(text, event_calendar=False):
         "inicio das vendas",
     )
 
+    publication_terms = (
+        "published on",
+        "publicado em",
+        "publicado no dia",
+        "published:",
+        "updated on",
+        "atualizado em",
+        "atualizado:",
+        "posted on",
+        "posted:",
+    )
+
     def is_sale_context(match):
         start = max(0, match.start() - 100)
         end = min(len(normalized), match.end() + 100)
@@ -553,12 +652,29 @@ def extract_date(text, event_calendar=False):
             for term in sale_terms
         )
 
+    def is_publication_context(match):
+        start = max(0, match.start() - 60)
+        end = min(len(normalized), match.end() + 60)
+
+        context = normalized[start:end]
+
+        return any(
+            term in context
+            for term in publication_terms
+        )
+
+    def is_usable_date(match):
+        return (
+            not is_sale_context(match)
+            and not is_publication_context(match)
+        )
+
     # DD/MM/YYYY or DD-MM-YYYY
     for match in re.finditer(
         r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b",
         normalized,
     ):
-        if is_sale_context(match):
+        if not is_usable_date(match):
             continue
 
         try:
@@ -576,7 +692,7 @@ def extract_date(text, event_calendar=False):
         r"\b20\d{2}-\d{2}-\d{2}\b",
         normalized,
     ):
-        if is_sale_context(match):
+        if not is_usable_date(match):
             continue
 
         try:
@@ -596,7 +712,7 @@ def extract_date(text, event_calendar=False):
     )
 
     for match in re.finditer(pattern, normalized):
-        if is_sale_context(match):
+        if not is_usable_date(match):
             continue
 
         start = max(0, match.start() - 90)
@@ -654,7 +770,7 @@ def extract_date(text, event_calendar=False):
     )
 
     for match in re.finditer(short_pattern, normalized):
-        if is_sale_context(match):
+        if not is_usable_date(match):
             continue
 
         month_number = MONTHS[match.group(2)]
@@ -768,6 +884,14 @@ def extract_article_from_soup(soup, page_url):
     ]):
         element.decompose()
 
+    # If no page-level image was found, look inside the article
+    # body for a content image.
+    if not image_url:
+        inline_image = extract_image(content_area, page_url)
+
+        if inline_image:
+            image_url = inline_image
+
     paragraphs = []
 
     for element in content_area.find_all([
@@ -819,6 +943,7 @@ def build_article(
     image_url="",
     event_date="",
     event_location="",
+    category=None,
 ):
     title = clean_text(title)
     content = clean_content(content)
@@ -851,6 +976,19 @@ def build_article(
         logger.info("Skipping cancelled item: %s", title)
         return None
 
+    final_category = (
+        category
+        or derive_category(detail_url)
+        or source.get("category")
+        or "News"
+    )
+
+    final_location = (
+        event_location
+        or extract_location(content)
+        or DEFAULT_LOCATION.get(source.get("name", ""), "")
+    )
+
     return {
         "source_name": source["name"],
         "source_url": detail_url,
@@ -859,11 +997,8 @@ def build_article(
         "image_url": image_url or "",
         "image_credit": source["name"] if image_url else "",
         "event_date": event_date or extract_date(content),
-        "event_location": (
-            event_location
-            or extract_location(content)
-        ),
-        "category": source.get("category", "Tourism"),
+        "event_location": final_location,
+        "category": final_category,
     }
 
 
@@ -900,21 +1035,10 @@ def extract_jsonld_events(soup, source):
                 value.get("description", "")
             )
 
-            # An event must have its own URL. Using the listing page
-            # for every URL-less event would make unrelated events look
-            # like duplicates and send visitors to the wrong destination.
-            raw_event_url = value.get("url") or value.get("@id") or ""
             event_url = normalize_url(
-                raw_event_url,
+                value.get("url", ""),
                 source["url"],
-            )
-
-            if not event_url or canonical_url(event_url) == canonical_url(source["url"]):
-                logger.info(
-                    "Skipping structured event without its own URL: %s",
-                    title or "(untitled)",
-                )
-                event_url = ""
+            ) or source["url"]
 
             image = value.get("image", "")
 
@@ -975,28 +1099,24 @@ def extract_jsonld_events(soup, source):
 
                     image_url = image_url or detail_image
 
-            if not event_url:
-                # No event-specific destination: do not create a misleading record.
-                pass
-            else:
-                article = build_article(
-                    source,
-                    title,
-                    event_url,
-                    description,
-                    image_url,
-                    event_date,
-                    clean_text(location),
+            article = build_article(
+                source,
+                title,
+                event_url,
+                description,
+                image_url,
+                event_date,
+                clean_text(location),
+            )
+
+            if article:
+                dedup_key = canonical_url(
+                    article["source_url"]
                 )
 
-                if article:
-                    dedup_key = canonical_url(
-                        article["source_url"]
-                    )
-
-                    if dedup_key not in seen:
-                        seen.add(dedup_key)
-                        results.append(article)
+                if dedup_key not in seen:
+                    seen.add(dedup_key)
+                    results.append(article)
 
         for child_key, child in value.items():
             if child_key not in (
@@ -1027,6 +1147,29 @@ def extract_jsonld_events(soup, source):
 # EVENT CARD IDENTIFICATION
 # ---------------------------------------------------------
 
+def _inside_boilerplate(element):
+    """
+    True if the element lives inside navigation / header /
+    footer / sidebar markup. Used to avoid treating menu
+    headings as event cards.
+    """
+
+    for ancestor in element.parents:
+        tag = (ancestor.name or "").lower()
+
+        if tag in BOILERPLATE_TAGS:
+            return True
+
+        classes = " ".join(ancestor.get("class") or []).lower()
+        element_id = (ancestor.get("id") or "").lower()
+        haystack = f"{classes} {element_id}"
+
+        if any(word in haystack for word in BOILERPLATE_CLASS_WORDS):
+            return True
+
+    return False
+
+
 def get_card_for_heading(
     heading,
     max_headings=3,
@@ -1037,13 +1180,12 @@ def get_card_for_heading(
     Find the smallest sensible parent container around a heading
     that also contains a usable link.
 
-    Multiple headings are allowed so cards containing an H2
-    artist name and an H3 subtitle can still be identified.
-
-    If no ancestor within the search window contains a link,
-    the largest qualifying container is returned so the caller
-    can still use it (e.g. for title, image, or content).
+    Headings inside navigation / header / footer markup are
+    rejected so menu labels are not mistaken for events.
     """
+
+    if _inside_boilerplate(heading):
+        return None
 
     current = heading
     candidates = []
@@ -1159,11 +1301,8 @@ def get_card_link(card, base_url, title=""):
     if title_lower:
         matching = [
             item for item in candidates
-            if item["label"]
-            and (
-                title_lower in item["label"]
-                or item["label"] in title_lower
-            )
+            if title_lower in item["label"]
+            or item["label"] in title_lower
         ]
 
         if matching:
@@ -1319,6 +1458,58 @@ def collect_generic_events(source):
 # VIVO RIO
 # ---------------------------------------------------------
 
+def _looks_like_subtitle(text):
+    t = clean_text(text).lower()
+
+    return (
+        t.startswith((
+            "apresenta",
+            "apresentação",
+            "apresentacao",
+            "show:",
+            "evento:",
+            "tour:",
+        ))
+        or "apresenta:" in t
+        or len(text) > 100
+    )
+
+
+def _find_artist_from_detail(detail_soup):
+    """
+    Recover the artist name from a detail page, using the H1
+    or the <title> tag as fallbacks.
+    """
+
+    if not detail_soup:
+        return ""
+
+    h1 = detail_soup.find("h1")
+
+    if h1:
+        text = clean_text(h1.get_text(" ", strip=True))
+
+        if 2 <= len(text) <= 120:
+            return text
+
+    title_tag = detail_soup.find("title")
+
+    if title_tag:
+        text = clean_text(title_tag.get_text(" ", strip=True))
+
+        # Strip common site suffixes like " - Vivo Rio".
+        text = re.split(
+            r"\s+[-|–—]\s+",
+            text,
+            maxsplit=1,
+        )[0]
+
+        if 2 <= len(text) <= 120:
+            return text
+
+    return ""
+
+
 def collect_vivo_rio(source):
     soup = get_soup(source["url"])
 
@@ -1338,11 +1529,11 @@ def collect_vivo_rio(source):
     seen = set()
 
     for heading in soup.find_all("h2"):
-        artist = clean_text(
+        heading_text = clean_text(
             heading.get_text(" ", strip=True)
         )
 
-        if len(artist) < 2 or len(artist) > 120:
+        if len(heading_text) < 2 or len(heading_text) > 150:
             continue
 
         card = get_card_for_heading(
@@ -1360,20 +1551,14 @@ def collect_vivo_rio(source):
                 subheading.get_text(" ", strip=True)
             )
 
-            if candidate and candidate.lower() != artist.lower():
+            if candidate and candidate.lower() != heading_text.lower():
                 subtitle = candidate
                 break
-
-        title = (
-            f"{artist} — {subtitle}"
-            if subtitle
-            else artist
-        )
 
         detail_url = get_card_link(
             card,
             source["url"],
-            artist,
+            heading_text,
         )
 
         if not detail_url:
@@ -1390,7 +1575,7 @@ def collect_vivo_rio(source):
             card.get_text("\n", strip=True)
         )
 
-        content, image_url, _ = extract_article(
+        content, image_url, detail_soup = extract_article(
             detail_url
         )
 
@@ -1401,6 +1586,30 @@ def collect_vivo_rio(source):
             image_url
             or extract_image(card, source["url"])
         )
+
+        # On some Vivo Rio layouts the H2 holds the show subtitle
+        # rather than the artist. In that case, recover the artist
+        # name from the detail page.
+        if _looks_like_subtitle(heading_text):
+            artist = _find_artist_from_detail(detail_soup)
+
+            if not artist:
+                artist = heading_text
+
+            show_line = heading_text
+
+            if subtitle and subtitle.lower() != show_line.lower():
+                title = f"{artist} — {show_line}"
+            else:
+                title = f"{artist} — {show_line}" if artist != show_line else artist
+        else:
+            artist = heading_text
+
+            title = (
+                f"{artist} — {subtitle}"
+                if subtitle
+                else artist
+            )
 
         article = build_article(
             source,
@@ -1589,6 +1798,9 @@ def collect_city_hall(source):
     1. WordPress REST API
     2. JSON-LD on the listing page
     3. Article links from the listing page
+
+    These are news items, not events. Publication dates are
+    deliberately not surfaced as event dates.
     """
 
     soup = get_soup(source["url"])
@@ -1688,7 +1900,11 @@ def collect_city_hall(source):
                     detail_url,
                     content,
                     image_url,
-                    extract_date(content),
+                    # News, not events: publication date is not
+                    # an event date, so we pass an explicit empty
+                    # string and let extract_date ignore publication
+                    # wording if it appears in the body.
+                    "",
                     extract_location(content),
                 )
 
@@ -1785,7 +2001,7 @@ def collect_city_hall(source):
                 detail_url,
                 content,
                 image_url,
-                extract_date(content),
+                "",
                 extract_location(content),
             )
 
