@@ -64,9 +64,10 @@ def save_article(article):
         supabase.table("news_articles").insert(record).execute()
 
         logger.info(
-            "Saved original event for later processing: %s",
+            "Saved original event for AI processing: %s",
             article.get("original_title")
         )
+
         return True
 
     except Exception as error:
@@ -93,7 +94,10 @@ def get_unprocessed_articles():
         return result.data
 
     except Exception as error:
-        logger.exception("Could not retrieve unprocessed articles: %s", error)
+        logger.exception(
+            "Could not retrieve unprocessed articles: %s",
+            error
+        )
         return []
 
 
@@ -102,16 +106,60 @@ def update_article(source_url, article):
         logger.warning("Cannot update article without a source URL.")
         return False
 
+    decision = article.get("decision")
+
+    if decision not in ("publish", "reject", "pending"):
+        logger.warning(
+            "Invalid editorial decision for %s: %s",
+            source_url,
+            decision
+        )
+        return False
+
     try:
+        if decision == "publish":
+            headline = article.get("headline", "").strip()
+            summary = article.get("summary", "").strip()
+            article_content = article.get("article_content", "").strip()
+            category = article.get("category", "").strip()
+
+            if not all([
+                headline,
+                summary,
+                article_content,
+                category
+            ]):
+                logger.warning(
+                    "Cannot publish incomplete article: %s",
+                    source_url
+                )
+                return False
+
+            new_status = "published"
+
+        elif decision == "reject":
+            new_status = "rejected"
+
+        else:
+            # Keep uncertain articles out of the public website
+            # and prevent repeated automatic AI processing.
+            new_status = "needs_review"
+
         record = {
-            "headline": article.get("headline"),
-            "summary": article.get("summary"),
-            "article_content": article.get("article_content"),
-            "category": article.get("category"),
+            "status": new_status,
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
-        # Update optional event and image information when supplied.
+        if decision == "publish":
+            record.update({
+                "headline": article.get("headline"),
+                "summary": article.get("summary"),
+                "article_content": article.get("article_content"),
+                "category": article.get("category")
+            })
+
+        # Preserve source and original content.
+        # Update event and image information when supplied.
         optional_fields = [
             "image_url",
             "image_credit",
@@ -119,18 +167,31 @@ def update_article(source_url, article):
             "event_location"
         ]
 
-        for field in optional_fields:
-            if field in article:
-                record[field] = article.get(field) or None
+        if decision == "publish":
+            for field in optional_fields:
+                if field in article:
+                    record[field] = article.get(field) or None
 
-        supabase.table("news_articles").update(
-            record
-        ).eq("source_url", source_url).execute()
+        result = (
+            supabase.table("news_articles")
+            .update(record)
+            .eq("source_url", source_url)
+            .execute()
+        )
+
+        if not result.data:
+            logger.warning(
+                "No database record was updated: %s",
+                source_url
+            )
+            return False
 
         logger.info(
-            "Updated event with AI content: %s",
-            article.get("headline")
+            "Article status updated to '%s': %s",
+            new_status,
+            article.get("headline") or source_url
         )
+
         return True
 
     except Exception as error:
