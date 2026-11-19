@@ -57,12 +57,130 @@ def is_temporary_error(error):
     )
 
 
+def build_prompt(title, content, source_name):
+    """Build the editorial prompt for Gemini."""
+
+    return f"""
+You are the senior editor of Rio Tips, an English-language
+tourism information website for American visitors to
+Rio de Janeiro, Brazil.
+
+Your job is to identify genuinely useful information
+for tourists and international visitors.
+
+SOURCE:
+{source_name}
+
+ORIGINAL TITLE:
+{title}
+
+ORIGINAL CONTENT:
+{content}
+
+EDITORIAL POLICY
+
+A. PUBLISH
+
+Select information that is genuinely useful or interesting
+to visitors, including:
+
+- Concerts and live music performances.
+- Music festivals and cultural festivals.
+- Public celebrations and street parties.
+- Carnival events and seasonal celebrations.
+- Public holidays and special commemorative days.
+- Theatre, dance, exhibitions and cultural performances.
+- Tourist attractions and special visitor experiences.
+- Important tourism announcements and useful visitor information.
+- Special events taking place in Rio de Janeiro.
+
+B. REJECT
+
+Reject information that is not useful to tourists, including:
+
+- Crime reports and police incidents.
+- Ordinary political news.
+- Routine government administration.
+- Routine traffic reports and road maintenance.
+- Ordinary business advertisements.
+- Unrelated local announcements.
+- Duplicate or promotional content without useful visitor information.
+
+C. PENDING
+
+Use pending if the information appears potentially useful
+but important facts are missing, contradictory or unclear.
+
+Examples:
+- An event is announced but its date cannot be established.
+- The venue is unclear.
+- The article contains too little information to describe
+  the event accurately.
+- The source information is contradictory.
+
+IMPORTANT EDITORIAL RULES
+
+1. Write in natural, fluent American English.
+2. Do not translate literally if a more natural English
+   expression communicates the same meaning.
+3. Explain Brazilian cultural references briefly when
+   necessary for an American reader.
+4. Preserve names of performers, venues and organizations.
+5. Never invent dates, times, prices, addresses or performers.
+6. Never assume an event is upcoming simply because it
+   appears on a website.
+7. If the event date is in the past, do not publish it
+   as an upcoming event.
+8. Do not claim that an event is confirmed if the source
+   does not establish this.
+9. Keep the article informative, useful and factual.
+10. Retain uncertainty when the source itself is uncertain.
+
+OUTPUT
+
+Return ONLY valid JSON.
+
+If the article should be published:
+
+{{
+    "decision": "publish",
+    "headline": "Natural English headline",
+    "summary": "Approximately 40-60 words in American English",
+    "article_content": "A well-written English article containing
+    the useful information from the original source",
+    "category": "Events, Music, Festivals, Culture, Tourism,
+    Public Holidays, or News",
+    "reason": "Brief explanation of why this is useful to tourists"
+}}
+
+If the article should be rejected:
+
+{{
+    "decision": "reject",
+    "reason": "Brief explanation"
+}}
+
+If the article requires further checking:
+
+{{
+    "decision": "pending",
+    "reason": "Explain what important information is missing
+    or uncertain"
+}}
+
+Do not include Markdown or text outside the JSON.
+"""
+
+
 def process_article(article):
     """
     Process one collected article with Gemini.
 
-    Returns a processed article dictionary,
-    or None if the article cannot be processed.
+    Returns:
+        A dictionary containing the editorial decision
+        and, if accepted, the English article.
+
+    Returns None if processing fails.
     Raises GeminiQuotaExceeded if the API quota is exhausted.
     """
 
@@ -78,44 +196,23 @@ def process_article(article):
         or ""
     )
 
+    source_name = (
+        article.get("source_name")
+        or article.get("source")
+        or "Unknown source"
+    )
+
     if not title or not content:
-        logger.warning("Skipping article with missing title or content.")
-        return None
+        logger.warning(
+            "Skipping article with missing title or content."
+        )
 
-    prompt = f"""
-You are an editor for an English-language Rio de Janeiro
-news and events website aimed at international visitors.
+        return {
+            "decision": "pending",
+            "reason": "Original title or content is missing."
+        }
 
-Evaluate the following article or event.
-
-If it is relevant to tourists, international visitors,
-or people interested in Rio de Janeiro, produce an
-English-language version.
-
-If it is not relevant, return:
-
-{{"relevant": false}}
-
-If it is relevant, return ONLY valid JSON with these fields:
-
-{{
-    "relevant": true,
-    "headline": "Short, attractive English headline",
-    "summary": "A concise summary of approximately 40-60 words",
-    "article_content": "A clear English-language article",
-    "category": "News, Events, Culture, Music, Tourism, or Other"
-}}
-
-Do not invent facts, dates, prices, locations, or details.
-Preserve the meaning of the original information.
-Do not include Markdown formatting.
-
-ORIGINAL TITLE:
-{title}
-
-ORIGINAL CONTENT:
-{content}
-"""
+    prompt = build_prompt(title, content, source_name)
 
     for attempt in range(1, MAX_RETRIES + 1):
 
@@ -138,26 +235,81 @@ ORIGINAL CONTENT:
 
             result = extract_json(response.text)
 
-            if not result.get("relevant", False):
-                logger.info("Article rejected by Gemini: %s", title)
+            decision = result.get("decision")
+
+            if decision not in ("publish", "reject", "pending"):
+                logger.warning(
+                    "Gemini returned an invalid decision: %s",
+                    decision
+                )
                 return None
 
+            if decision == "reject":
+                logger.info(
+                    "Article rejected by Gemini: %s | %s",
+                    title,
+                    result.get("reason", "")
+                )
+
+                return {
+                    "decision": "reject",
+                    "reason": result.get("reason", "")
+                }
+
+            if decision == "pending":
+                logger.info(
+                    "Article requires further checking: %s | %s",
+                    title,
+                    result.get("reason", "")
+                )
+
+                return {
+                    "decision": "pending",
+                    "reason": result.get("reason", "")
+                }
+
+            headline = result.get("headline", "").strip()
+            summary = result.get("summary", "").strip()
+            article_content = result.get("article_content", "").strip()
+            category = result.get("category", "").strip()
+
+            if not all([
+                headline,
+                summary,
+                article_content,
+                category
+            ]):
+                logger.warning(
+                    "Gemini returned incomplete English content: %s",
+                    title
+                )
+
+                return {
+                    "decision": "pending",
+                    "reason": "AI-generated article content is incomplete."
+                }
+
             processed_article = {
+                "decision": "publish",
+                "reason": result.get("reason", ""),
                 "source_url": article.get("source_url") or article.get("url"),
-                "source_name": article.get("source_name") or article.get("source"),
+                "source_name": source_name,
                 "original_title": title,
                 "original_content": content,
-                "headline": result.get("headline", title),
-                "summary": result.get("summary", ""),
-                "article_content": result.get("article_content", ""),
-                "category": result.get("category", "Other"),
+                "headline": headline,
+                "summary": summary,
+                "article_content": article_content,
+                "category": category,
                 "image_url": article.get("image_url"),
                 "image_credit": article.get("image_credit"),
                 "event_date": article.get("event_date"),
                 "event_location": article.get("event_location"),
             }
 
-            logger.info("Article accepted by Gemini: %s", title)
+            logger.info(
+                "Article accepted for automatic publishing: %s",
+                headline
+            )
 
             return processed_article
 
@@ -165,8 +317,7 @@ ORIGINAL CONTENT:
 
             if is_quota_error(error):
                 logger.error(
-                    "Gemini quota exhausted. Stopping all processing. "
-                    "Article: %s | Error: %s",
+                    "Gemini quota exhausted. Article: %s | Error: %s",
                     title,
                     error
                 )
@@ -180,19 +331,16 @@ ORIGINAL CONTENT:
                     wait_time = 5 * (2 ** (attempt - 1))
 
                     logger.warning(
-                        "Temporary Gemini error. "
-                        "Retrying in %s seconds. Error: %s",
-                        wait_time,
-                        error
+                        "Temporary Gemini error. Retrying in %s seconds.",
+                        wait_time
                     )
 
                     time.sleep(wait_time)
                     continue
 
-            logger.error(
-                "Gemini processing failed for article '%s': %s",
-                title,
-                error
+            logger.exception(
+                "Gemini processing failed for article '%s'.",
+                title
             )
 
             return None
