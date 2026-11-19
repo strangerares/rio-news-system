@@ -418,7 +418,46 @@ def _parse_srcset(srcset):
     entries.sort(key=lambda item: item[0])
     return entries[-1][1] if entries else ""
 
+def _extract_css_url(style):
+    """
+    Extract a URL from a CSS declaration containing url(...).
 
+    Handles quoted and unquoted forms, including filenames with
+    internal parentheses like "CARD (13).jpg".
+    """
+    if not style or "url(" not in style.lower():
+        return ""
+
+    # Quoted — most reliable.
+    match = re.search(r'url\(\s*"([^"]+)"\s*\)', style)
+    if match:
+        return match.group(1)
+
+    match = re.search(r"url\(\s*'([^']+)'\s*\)", style)
+    if match:
+        return match.group(1)
+
+    # Unquoted — grab from url( up to the LAST ) before ; or end.
+    # Filenames like "CARD (13).jpg" contain internal parens that
+    # must not truncate the match.
+    match = re.search(
+        r"url\(\s*([^;]+?)\s*\)\s*(?:;|$)",
+        style,
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip().strip('"').strip("'")
+
+    match = re.search(
+        r"url\(\s*([^;]+?)\s*\)",
+        style,
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip().strip('"').strip("'")
+
+    return ""
+    
 def extract_image(container, base_url):
     if not container:
         return ""
@@ -442,17 +481,15 @@ def extract_image(container, base_url):
                     if result:
                         return result
 
-    # 3. Inline / lazy CSS background-image.
+       # 3. Inline / lazy CSS background — catches background-image AND
+    # the background shorthand (both are used on Qualistage cards).
     for styled in container.find_all(style=True):
         style = styled.get("style") or ""
-        if "background-image" not in style.lower():
+        if "url(" not in style.lower():
             continue
-        match = re.search(
-            r'url\(\s*["\']?([^"\')]+)',
-            style, re.IGNORECASE,
-        )
-        if match:
-            result = normalize_url(match.group(1), base_url)
+        css_url = _extract_css_url(style)
+        if css_url:
+            result = normalize_url(css_url, base_url)
             if result:
                 return result
 
@@ -731,37 +768,54 @@ def extract_date_from_time_tags(container):
 
 def extract_event_date(card, content, event_calendar=True):
     """
-    Try card → parent → content for a date.
+    Try card → up to 2 parents → content for a date.
 
-    Events often have a date badge in a sibling element or the
-    parent wrapper, which get_card_for_heading may not include.
+    Date badges are often siblings of the card inside a shared
+    wrapper, so checking only the card misses them. We walk up
+    two levels and stop if a parent looks like page chrome
+    (more than 6 headings = a list page, not an event card).
+    Both <time> elements and free text are examined at each level.
     """
-    if card:
-        date_from_time = extract_date_from_time_tags(card)
+    if not card:
+        return extract_date(content or "", event_calendar=event_calendar)
+
+    date_from_time = extract_date_from_time_tags(card)
+    if date_from_time:
+        return date_from_time
+
+    card_text = clean_content(card.get_text("\n", strip=True))
+    combined = card_text + " " + (content or "")
+
+    result = extract_date(combined, event_calendar=event_calendar)
+    if result:
+        return result
+
+    parent = card.parent
+    for _ in range(2):
+        if not parent:
+            break
+
+        if len(parent.find_all(["h1", "h2", "h3", "h4"])) > 6:
+            break
+
+        date_from_time = extract_date_from_time_tags(parent)
         if date_from_time:
             return date_from_time
 
-        card_text = clean_content(card.get_text("\n", strip=True))
-        combined = card_text + " " + (content or "")
+        parent_text = clean_content(
+            parent.get_text("\n", strip=True)
+        )[:1500]
 
-        result = extract_date(combined, event_calendar=event_calendar)
+        result = extract_date(
+            parent_text + " " + combined,
+            event_calendar=event_calendar,
+        )
         if result:
             return result
 
-        parent = card.parent
-        if parent:
-            parent_text = clean_content(
-                parent.get_text("\n", strip=True)
-            )[:1000]
-            result = extract_date(
-                parent_text + " " + combined,
-                event_calendar=event_calendar,
-            )
-            if result:
-                return result
+        parent = parent.parent
 
     return extract_date(content or "", event_calendar=event_calendar)
-
 
 # ---------------------------------------------------------
 # ARTICLE EXTRACTION
