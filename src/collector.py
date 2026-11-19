@@ -2,7 +2,7 @@
 import json
 import logging
 import re
-from datetime import date, datetime
+from datetime import date
 from urllib.parse import urljoin, urlparse, urldefrag
 
 import requests
@@ -128,18 +128,42 @@ def is_excluded_url(url):
 
 def is_cancelled(text):
     normalized = clean_text(text).lower()
-    return any(term in normalized for term in CANCELLED_TERMS)
+
+    # Avoid rejecting an article simply because it mentions
+    # a different cancelled event in passing.
+    cancellation_phrases = [
+        "evento cancelado",
+        "event cancelled",
+        "event canceled",
+        "show cancelado",
+        "apresentação cancelada",
+        "apresentacao cancelada",
+        "foi cancelado",
+        "foi cancelada",
+        "está cancelado",
+        "esta cancelado",
+        "está cancelada",
+        "esta cancelada",
+        "cancelled",
+        "canceled",
+    ]
+
+    return any(term in normalized for term in cancellation_phrases)
 
 
 def extract_date(text):
     """
-    Extract dates in YYYY-MM-DD format.
+    Extract a clearly stated event date in YYYY-MM-DD format.
 
-    Supports numeric dates, ISO dates, Portuguese month names,
-    and short calendar formats.
+    Supports:
+    - DD/MM/YYYY
+    - DD-MM-YYYY
+    - YYYY-MM-DD
+    - Portuguese month names
+    - Short calendar formats such as 20 | nov
 
-    Rejects dates associated with ticket sales and presales.
-    Does not guess a future year for dates without one.
+    Avoids dates associated with ticket sales and presales.
+    Does not roll past dates into a future year.
     """
 
     if not text:
@@ -182,43 +206,41 @@ def extract_date(text):
     )
 
     def is_sale_context(match):
-        start = max(0, match.start() - 100)
-        end = min(len(text), match.end() + 100)
+        start = max(0, match.start() - 120)
+        end = min(len(text), match.end() + 120)
         context = text[start:end]
-
         return any(term in context for term in sale_terms)
 
     # DD/MM/YYYY or DD-MM-YYYY
-    match = re.search(
-        r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b",
-        text,
-    )
+    numeric_pattern = r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b"
 
-    if match and not is_sale_context(match):
+    for match in re.finditer(numeric_pattern, text):
+        if is_sale_context(match):
+            continue
+
         day_number, month_number, year_number = map(
             int, match.groups()
         )
 
         try:
-            return date(
+            candidate = date(
                 year_number, month_number, day_number
-            ).isoformat()
+            )
+            return candidate.isoformat()
         except ValueError:
-            pass
+            continue
 
     # YYYY-MM-DD
-    match = re.search(
-        r"\b(20\d{2})-(\d{2})-(\d{2})\b",
-        text,
-    )
+    iso_pattern = r"\b(20\d{2})-(\d{2})-(\d{2})\b"
 
-    if match and not is_sale_context(match):
+    for match in re.finditer(iso_pattern, text):
+        if is_sale_context(match):
+            continue
+
         try:
-            return date.fromisoformat(
-                match.group(0)
-            ).isoformat()
+            return date.fromisoformat(match.group(0)).isoformat()
         except ValueError:
-            pass
+            continue
 
     # Portuguese: 19 de novembro de 2026
     # or 19 de novembro
@@ -233,10 +255,11 @@ def extract_date(text):
         if is_sale_context(match):
             continue
 
-        start = max(0, match.start() - 100)
-        end = min(len(text), match.end() + 100)
+        start = max(0, match.start() - 120)
+        end = min(len(text), match.end() + 120)
         context = text[start:end]
 
+        # A month-name date must be connected to an event context.
         if not any(term in context for term in event_terms):
             continue
 
@@ -254,6 +277,7 @@ def extract_date(text):
         except ValueError:
             continue
 
+        # Do not assume that an old date belongs to next year.
         if not year_text and candidate < today:
             continue
 
@@ -266,9 +290,18 @@ def extract_date(text):
     )
 
     short_months = {
-        "jan": 1, "fev": 2, "mar": 3, "abr": 4,
-        "mai": 5, "jun": 6, "jul": 7, "ago": 8,
-        "set": 9, "out": 10, "nov": 11, "dez": 12,
+        "jan": 1,
+        "fev": 2,
+        "mar": 3,
+        "abr": 4,
+        "mai": 5,
+        "jun": 6,
+        "jul": 7,
+        "ago": 8,
+        "set": 9,
+        "out": 10,
+        "nov": 11,
+        "dez": 12,
     }
 
     match = re.search(short_pattern, text)
@@ -323,10 +356,7 @@ def extract_image(container, page_url):
         or image.get("src")
     )
 
-    if not image_url:
-        return ""
-
-    if image_url.startswith("data:"):
+    if not image_url or image_url.startswith("data:"):
         return ""
 
     return normalize_url(image_url, page_url)
@@ -360,8 +390,14 @@ def extract_article(url):
     image_url = extract_page_image(soup, url)
 
     for element in soup([
-        "script", "style", "nav", "footer",
-        "header", "aside", "form", "noscript",
+        "script",
+        "style",
+        "nav",
+        "footer",
+        "header",
+        "aside",
+        "form",
+        "noscript",
     ]):
         element.decompose()
 
@@ -393,7 +429,6 @@ def extract_article(url):
 def extract_jsonld_events(soup, source):
     """
     Read structured Event data when a website provides it.
-    This is a safe fallback for sites with JavaScript-heavy pages.
     """
 
     results = []
@@ -410,14 +445,9 @@ def extract_jsonld_events(soup, source):
         event_type = value.get("@type", "")
         types = event_type if isinstance(event_type, list) else [event_type]
 
-        if any(
-            str(item).lower() == "event"
-            for item in types
-        ):
+        if any(str(item).lower() == "event" for item in types):
             title = clean_text(value.get("name", ""))
-            description = clean_text(
-                value.get("description", "")
-            )
+            description = clean_text(value.get("description", ""))
 
             event_url = normalize_url(
                 value.get("url", ""),
@@ -425,28 +455,29 @@ def extract_jsonld_events(soup, source):
             )
 
             image = value.get("image", "")
+
             if isinstance(image, list):
                 image = image[0] if image else ""
+
             if isinstance(image, dict):
                 image = image.get("url", "")
 
             image_url = normalize_url(image, source["url"])
 
-            start_date = clean_text(
-                value.get("startDate", "")
-            )
+            start_date = clean_text(value.get("startDate", ""))
             event_date = extract_date(start_date)
 
             location = value.get("location", "")
+
             if isinstance(location, dict):
+                address = location.get("address", "")
+                if isinstance(address, dict):
+                    address = address.get("streetAddress", "")
+
                 location = (
                     location.get("name")
-                    or location.get("address")
+                    or address
                     or ""
-                )
-            if isinstance(location, dict):
-                location = clean_text(
-                    str(location)
                 )
 
             content = description or title
@@ -466,8 +497,12 @@ def extract_jsonld_events(soup, source):
 
         for key, child in value.items():
             if key not in (
-                "@context", "@type", "name",
-                "description", "url", "image",
+                "@context",
+                "@type",
+                "name",
+                "description",
+                "url",
+                "image",
             ):
                 if isinstance(child, (dict, list)):
                     inspect(child)
@@ -527,7 +562,6 @@ def build_article(
 def get_event_card(heading):
     """
     Find the nearest parent that contains exactly one h2 event.
-    This prevents a heading from being matched to a neighboring event.
     """
 
     current = heading
@@ -537,8 +571,8 @@ def get_event_card(heading):
             break
 
         current = current.parent
-
         headings = current.find_all("h2")
+
         if len(headings) != 1:
             continue
 
@@ -607,9 +641,7 @@ def collect_vivo_rio(source):
     articles = []
     seen = set()
 
-    headings = soup.find_all("h2")
-
-    for heading in headings:
+    for heading in soup.find_all("h2"):
         artist = clean_text(
             heading.get_text(" ", strip=True)
         )
@@ -622,8 +654,7 @@ def collect_vivo_rio(source):
         if not card:
             continue
 
-        card_headings = card.find_all("h2")
-        if len(card_headings) != 1:
+        if len(card.find_all("h2")) != 1:
             continue
 
         subtitle = ""
@@ -638,6 +669,7 @@ def collect_vivo_rio(source):
                 break
 
         title = artist
+
         if subtitle:
             title = f"{artist} — {subtitle}"
 
@@ -677,10 +709,7 @@ def collect_vivo_rio(source):
 
         if article:
             articles.append(article)
-            logger.info(
-                "Vivo Rio event found: %s",
-                title,
-            )
+            logger.info("Vivo Rio event found: %s", title)
 
         if len(articles) >= MAX_ARTICLES_PER_SOURCE:
             break
@@ -696,8 +725,7 @@ def collect_vivo_rio(source):
 
 def collect_city_hall(source):
     """
-    Find actual news links rather than treating navigation headings
-    such as 'The City Hall' as news articles.
+    Find actual news links rather than navigation headings.
     """
 
     html = fetch_page(source["url"])
@@ -730,10 +758,9 @@ def collect_city_hall(source):
         ):
             continue
 
-        # City Hall news articles use individual article pages.
         path = urlparse(detail_url).path.strip("/")
 
-        if not path or len(path.split("/")) < 1:
+        if not path:
             continue
 
         seen.add(detail_url)
@@ -747,8 +774,9 @@ def collect_city_hall(source):
             )
             continue
 
-        # Prefer the actual article heading over the archive link label.
+        # Prefer the actual article heading.
         detail_html = fetch_page(detail_url)
+
         if detail_html:
             detail_soup = BeautifulSoup(
                 detail_html, "html.parser"
@@ -759,6 +787,7 @@ def collect_city_hall(source):
                 page_title = clean_text(
                     page_heading.get_text(" ", strip=True)
                 )
+
                 if len(page_title) >= 12:
                     title = page_title
 
@@ -774,10 +803,7 @@ def collect_city_hall(source):
 
         if article:
             articles.append(article)
-            logger.info(
-                "City Hall news found: %s",
-                title,
-            )
+            logger.info("City Hall news found: %s", title)
 
         if len(articles) >= MAX_ARTICLES_PER_SOURCE:
             break
@@ -794,7 +820,6 @@ def collect_city_hall(source):
 def collect_fundicao(source):
     """
     Fundição Progresso event cards use 'SAIBA MAIS' links.
-    Only accepts a link when its nearby card has one clear event title.
     """
 
     html = fetch_page(source["url"])
@@ -827,6 +852,7 @@ def collect_fundicao(source):
             continue
 
         card = link
+
         for _ in range(6):
             if card.parent is None:
                 break
@@ -890,10 +916,7 @@ def collect_fundicao(source):
 
         if article:
             articles.append(article)
-            logger.info(
-                "Fundição event found: %s",
-                title,
-            )
+            logger.info("Fundição event found: %s", title)
 
         if len(articles) >= MAX_ARTICLES_PER_SOURCE:
             break
@@ -941,6 +964,7 @@ def collect_qualistage(source):
             continue
 
         card = heading
+
         for _ in range(6):
             if card.parent is None:
                 break
@@ -1060,9 +1084,7 @@ def collect_generic_events(source):
     articles = []
     seen = set()
 
-    for heading in soup.find_all(
-        ["h1", "h2", "h3"]
-    ):
+    for heading in soup.find_all(["h1", "h2", "h3"]):
         title = clean_text(
             heading.get_text(" ", strip=True)
         )
@@ -1087,10 +1109,7 @@ def collect_generic_events(source):
                 ["h1", "h2", "h3"]
             )
 
-            if (
-                len(headings) == 1
-                and 50 <= len(text) <= 2500
-            ):
+            if len(headings) == 1 and 50 <= len(text) <= 2500:
                 card = current
                 break
 
@@ -1106,9 +1125,7 @@ def collect_generic_events(source):
 
         seen.add(detail_url)
 
-        content, image_url = extract_article(
-            detail_url
-        )
+        content, image_url = extract_article(detail_url)
 
         card_text = clean_text(
             card.get_text(" ", strip=True)
