@@ -1,4 +1,3 @@
-
 import json
 import logging
 import re
@@ -8,108 +7,59 @@ from urllib.parse import urljoin, urlparse, urldefrag
 import requests
 from bs4 import BeautifulSoup
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (compatible; RioNewsCollector/1.0; "
-        "+https://rioprivatedriver.com)"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
     )
 }
 
+TIMEOUT = (8, 25)
 MAX_ARTICLES_PER_SOURCE = 12
-TIMEOUT = (5, 20)
-MIN_ARTICLE_LENGTH = 70
+MIN_CONTENT_LENGTH = 45
 
-CANCELLED_TERMS = [
-    "evento cancelado",
-    "event cancelled",
-    "event canceled",
-    "show cancelado",
-    "cancelled",
-    "canceled",
-    "cancelado",
-    "cancelada",
-]
-
-EXCLUDED_PATHS = [
-    "/category/",
-    "/categoria/",
-    "/tag/",
-    "/author/",
-    "/page/",
-    "/wp-content/",
-    "/wp-admin/",
-    "/wp-json/",
-    "/feed/",
-    "/search/",
-    "/orgaos_municipais/",
+EXCLUDED_PATHS = (
+    "/category/", "/categoria/", "/tag/", "/author/",
+    "/page/", "/wp-content/", "/wp-admin/", "/wp-json/",
+    "/feed/", "/search/", "/privacy-policy",
+    "/politica-de-privacidade", "/orgaos_municipais/",
     "/municipal-agencies/",
-    "/politica-de-privacidade",
-    "/privacy-policy",
-]
+)
 
-PORTUGUESE_MONTHS = {
-    "janeiro": 1,
-    "fevereiro": 2,
-    "marco": 3,
-    "março": 3,
-    "abril": 4,
-    "maio": 5,
-    "junho": 6,
-    "julho": 7,
-    "agosto": 8,
-    "setembro": 9,
-    "outubro": 10,
-    "novembro": 11,
-    "dezembro": 12,
+MONTHS = {
+    "janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3,
+    "abril": 4, "maio": 5, "junho": 6, "julho": 7,
+    "agosto": 8, "setembro": 9, "outubro": 10,
+    "novembro": 11, "dezembro": 12,
+    "jan": 1, "fev": 2, "mar": 3, "abr": 4,
+    "mai": 5, "jun": 6, "jul": 7, "ago": 8,
+    "set": 9, "out": 10, "nov": 11, "dez": 12,
 }
 
 
-def load_sources():
-    with open("sources.json", "r", encoding="utf-8") as file:
-        return json.load(file)["sources"]
-
-
-def fetch_page(url):
-    try:
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=TIMEOUT,
-        )
-        response.raise_for_status()
-
-        content_type = response.headers.get(
-            "Content-Type", ""
-        ).lower()
-
-        if "text/html" not in content_type:
-            logger.warning("Not an HTML page: %s", url)
-            return None
-
-        return response.text
-
-    except requests.RequestException as error:
-        logger.warning("Could not fetch %s: %s", url, error)
-        return None
-
-
 def clean_text(value):
-    return re.sub(r"\s+", " ", value or "").strip()
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def normalize_url(url, base_url):
     if not url:
         return ""
 
-    url = urljoin(base_url, url.strip())
+    url = urljoin(base_url, str(url).strip())
     url, _ = urldefrag(url)
 
     parsed = urlparse(url)
 
     if parsed.scheme not in ("http", "https"):
+        return ""
+
+    if parsed.path.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg")):
         return ""
 
     return url
@@ -123,402 +73,270 @@ def same_domain(url, base_url):
 
 def is_excluded_url(url):
     path = urlparse(url).path.lower()
-    return any(item in path for item in EXCLUDED_PATHS)
+    return any(part in path for part in EXCLUDED_PATHS)
 
 
-def is_cancelled(text):
-    normalized = clean_text(text).lower()
+def fetch_page(url):
+    try:
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=TIMEOUT,
+        )
+        response.raise_for_status()
 
-    # Avoid rejecting an article simply because it mentions
-    # a different cancelled event in passing.
-    cancellation_phrases = [
-        "evento cancelado",
-        "event cancelled",
-        "event canceled",
-        "show cancelado",
-        "apresentação cancelada",
-        "apresentacao cancelada",
-        "foi cancelado",
-        "foi cancelada",
-        "está cancelado",
-        "esta cancelado",
-        "está cancelada",
-        "esta cancelada",
-        "cancelled",
-        "canceled",
-    ]
+        content_type = response.headers.get("Content-Type", "").lower()
+        if content_type and "html" not in content_type:
+            logger.warning("Not an HTML page: %s", url)
+            return None
 
-    return any(term in normalized for term in cancellation_phrases)
+        return response.text
+
+    except requests.RequestException as error:
+        logger.warning("Could not fetch %s: %s", url, error)
+        return None
 
 
-def extract_date(text):
-    """
-    Extract a clearly stated event date in YYYY-MM-DD format.
+def get_soup(url):
+    html = fetch_page(url)
+    return BeautifulSoup(html, "html.parser") if html else None
 
-    Supports:
-    - DD/MM/YYYY
-    - DD-MM-YYYY
-    - YYYY-MM-DD
-    - Portuguese month names
-    - Short calendar formats such as 20 | nov
 
-    Avoids dates associated with ticket sales and presales.
-    Does not roll past dates into a future year.
-    """
-
-    if not text:
+def extract_image(container, base_url):
+    if not container:
         return ""
 
-    text = clean_text(text).lower()
-    today = date.today()
+    for image in container.find_all("img"):
+        candidates = [
+            image.get("data-src"),
+            image.get("data-lazy-src"),
+            image.get("data-original"),
+            image.get("data-original-src"),
+            image.get("src"),
+        ]
 
-    sale_terms = (
-        "pré-venda",
-        "pre-venda",
-        "pre venda",
-        "venda de ingressos",
-        "vendas de ingressos",
-        "ingressos à venda",
-        "ingressos a venda",
-        "compra de ingressos",
-        "comprar ingressos",
-        "bilheteria",
-        "abertura das vendas",
-        "início das vendas",
-        "inicio das vendas",
-    )
+        srcset = image.get("srcset") or image.get("data-srcset")
+        if srcset:
+            first = srcset.split(",")[0].strip().split(" ")[0]
+            candidates.insert(0, first)
 
-    event_terms = (
-        "no dia",
-        "dia ",
-        "acontece",
-        "acontecerá",
-        "acontecera",
-        "será realizado",
-        "sera realizado",
-        "apresentação será",
-        "apresentacao sera",
-        "show será",
-        "show sera",
-        "data do evento",
-        "data da apresentação",
-        "data da apresentacao",
-    )
+        for candidate in candidates:
+            if candidate and not candidate.startswith("data:"):
+                result = normalize_url(candidate, base_url)
+                if result:
+                    return result
 
-    def is_sale_context(match):
-        start = max(0, match.start() - 120)
-        end = min(len(text), match.end() + 120)
-        context = text[start:end]
-        return any(term in context for term in sale_terms)
+    return ""
 
-    # DD/MM/YYYY or DD-MM-YYYY
-    numeric_pattern = r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b"
 
-    for match in re.finditer(numeric_pattern, text):
-        if is_sale_context(match):
-            continue
-
-        day_number, month_number, year_number = map(
-            int, match.groups()
+def extract_page_image(soup, page_url):
+    for key in ("og:image", "twitter:image"):
+        tag = (
+            soup.find("meta", property=key)
+            or soup.find("meta", attrs={"name": key})
         )
-
-        try:
-            candidate = date(
-                year_number, month_number, day_number
-            )
-            return candidate.isoformat()
-        except ValueError:
-            continue
-
-    # YYYY-MM-DD
-    iso_pattern = r"\b(20\d{2})-(\d{2})-(\d{2})\b"
-
-    for match in re.finditer(iso_pattern, text):
-        if is_sale_context(match):
-            continue
-
-        try:
-            return date.fromisoformat(match.group(0)).isoformat()
-        except ValueError:
-            continue
-
-    # Portuguese: 19 de novembro de 2026
-    # or 19 de novembro
-    portuguese_pattern = (
-        r"\b(?:dia\s+)?(\d{1,2})\s+de\s+"
-        r"(janeiro|fevereiro|março|marco|abril|maio|"
-        r"junho|julho|agosto|setembro|outubro|novembro|dezembro)"
-        r"(?:\s+de\s+(20\d{2}))?\b"
-    )
-
-    for match in re.finditer(portuguese_pattern, text):
-        if is_sale_context(match):
-            continue
-
-        start = max(0, match.start() - 120)
-        end = min(len(text), match.end() + 120)
-        context = text[start:end]
-
-        # A month-name date must be connected to an event context.
-        if not any(term in context for term in event_terms):
-            continue
-
-        day_number = int(match.group(1))
-        month_name = match.group(2)
-        year_text = match.group(3)
-
-        month_number = PORTUGUESE_MONTHS[month_name]
-        year_number = int(year_text) if year_text else today.year
-
-        try:
-            candidate = date(
-                year_number, month_number, day_number
-            )
-        except ValueError:
-            continue
-
-        # Do not assume that an old date belongs to next year.
-        if not year_text and candidate < today:
-            continue
-
-        return candidate.isoformat()
-
-    # Short calendar format: 19 | nov or 19 / nov
-    short_pattern = (
-        r"\b(\d{1,2})\s*[|/]\s*"
-        r"(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\b"
-    )
-
-    short_months = {
-        "jan": 1,
-        "fev": 2,
-        "mar": 3,
-        "abr": 4,
-        "mai": 5,
-        "jun": 6,
-        "jul": 7,
-        "ago": 8,
-        "set": 9,
-        "out": 10,
-        "nov": 11,
-        "dez": 12,
-    }
-
-    match = re.search(short_pattern, text)
-
-    if match and not is_sale_context(match):
-        day_number = int(match.group(1))
-        month_number = short_months[match.group(2)]
-
-        try:
-            candidate = date(
-                today.year, month_number, day_number
-            )
-
-            if candidate >= today:
-                return candidate.isoformat()
-
-        except ValueError:
-            pass
+        if tag and tag.get("content"):
+            return normalize_url(tag["content"], page_url)
 
     return ""
 
 
 def extract_location(text):
-    text = clean_text(text)
-
     patterns = [
         r"(?:local|venue|onde)\s*:\s*([^|.;]{3,100})",
         r"(?:endereço|endereco)\s*:\s*([^|.;]{3,100})",
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
+        match = re.search(pattern, text or "", re.IGNORECASE)
         if match:
             return clean_text(match.group(1))
+
+    known_venues = [
+        "Qualistage", "Vivo Rio", "Circo Voador",
+        "Fundição Progresso", "Fundicao Progresso",
+        "Maracanã", "Maracana", "Cidade das Artes",
+        "Farmasi Arena", "Jeunesse Arena",
+    ]
+
+    for venue in known_venues:
+        if venue.lower() in (text or "").lower():
+            return venue
 
     return ""
 
 
-def extract_image(container, page_url):
-    if not container:
+def extract_date(text):
+    """
+    Extract an explicitly stated date.
+    Does not convert old dates into dates in the following year.
+    Avoids dates close to ticket-sale or presale wording.
+    """
+    if not text:
         return ""
 
-    image = container.find("img")
+    original = clean_text(text)
+    normalized = original.lower()
+    today = date.today()
 
-    if not image:
-        return ""
-
-    image_url = (
-        image.get("data-src")
-        or image.get("data-lazy-src")
-        or image.get("data-original")
-        or image.get("src")
+    sale_terms = (
+        "pré-venda", "pre-venda", "pre venda",
+        "venda de ingressos", "vendas de ingressos",
+        "ingressos à venda", "ingressos a venda",
+        "compra de ingressos", "comprar ingressos",
+        "bilheteria", "abertura das vendas",
+        "início das vendas", "inicio das vendas",
     )
 
-    if not image_url or image_url.startswith("data:"):
-        return ""
+    def is_sale_context(match):
+        start = max(0, match.start() - 100)
+        end = min(len(normalized), match.end() + 100)
+        context = normalized[start:end]
+        return any(term in context for term in sale_terms)
 
-    return normalize_url(image_url, page_url)
+    # DD/MM/YYYY or DD-MM-YYYY
+    for match in re.finditer(
+        r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b",
+        normalized,
+    ):
+        if is_sale_context(match):
+            continue
+        try:
+            return date(
+                int(match.group(3)),
+                int(match.group(2)),
+                int(match.group(1)),
+            ).isoformat()
+        except ValueError:
+            continue
 
+    # YYYY-MM-DD
+    for match in re.finditer(r"\b20\d{2}-\d{2}-\d{2}\b", normalized):
+        if is_sale_context(match):
+            continue
+        try:
+            return date.fromisoformat(match.group()).isoformat()
+        except ValueError:
+            continue
 
-def extract_page_image(soup, page_url):
-    for property_name in ("og:image", "twitter:image"):
-        image_tag = soup.find(
-            "meta",
-            attrs={"property": property_name},
-        ) or soup.find(
-            "meta",
-            attrs={"name": property_name},
+    # Portuguese dates: 16 de fevereiro de 2027
+    pattern = (
+        r"\b(?:dia\s+)?(\d{1,2})\s+de\s+"
+        r"(janeiro|fevereiro|março|marco|abril|maio|junho|"
+        r"julho|agosto|setembro|outubro|novembro|dezembro)"
+        r"(?:\s+de\s+(20\d{2}))?\b"
+    )
+
+    for match in re.finditer(pattern, normalized):
+        if is_sale_context(match):
+            continue
+
+        # A date must be near wording that describes the event,
+        # not merely a date mentioned somewhere in the article.
+        start = max(0, match.start() - 90)
+        end = min(len(normalized), match.end() + 90)
+        context = normalized[start:end]
+
+        event_words = (
+            "no dia", "dia ", "acontece", "acontecerá",
+            "acontecera", "show", "apresentação",
+            "apresentacao", "realizado", "será", "sera",
+            "no qualistage", "no rio de janeiro",
         )
 
-        if image_tag and image_tag.get("content"):
-            return normalize_url(
-                image_tag["content"], page_url
+        if not any(word in context for word in event_words):
+            continue
+
+        day_number = int(match.group(1))
+        month_number = MONTHS[match.group(2)]
+        year_number = int(match.group(3)) if match.group(3) else today.year
+
+        try:
+            candidate = date(year_number, month_number, day_number)
+        except ValueError:
+            continue
+
+        if not match.group(3) and candidate < today:
+            continue
+
+        return candidate.isoformat()
+
+    # Compact event-calendar format, e.g. 20 | nov
+    short_pattern = (
+        r"\b(\d{1,2})\s*[|/]\s*"
+        r"(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\b"
+    )
+
+    for match in re.finditer(short_pattern, normalized):
+        if is_sale_context(match):
+            continue
+
+        try:
+            candidate = date(
+                today.year,
+                MONTHS[match.group(2)],
+                int(match.group(1)),
             )
+        except ValueError:
+            continue
+
+        if candidate >= today:
+            return candidate.isoformat()
 
     return ""
 
 
 def extract_article(url):
-    html = fetch_page(url)
-
-    if not html:
+    soup = get_soup(url)
+    if not soup:
         return "", ""
 
-    soup = BeautifulSoup(html, "html.parser")
     image_url = extract_page_image(soup, url)
 
-    for element in soup([
-        "script",
-        "style",
-        "nav",
-        "footer",
-        "header",
-        "aside",
-        "form",
-        "noscript",
+    # Prefer common WordPress and editorial content containers.
+    selectors = [
+        ".entry-content",
+        ".post-content",
+        ".article-content",
+        ".elementor-widget-theme-post-content",
+        ".content-area article",
+        "article",
+        "main",
+    ]
+
+    content_area = None
+
+    for selector in selectors:
+        content_area = soup.select_one(selector)
+        if content_area:
+            break
+
+    if not content_area:
+        content_area = soup.body
+
+    if not content_area:
+        return "", image_url
+
+    for element in content_area.find_all([
+        "script", "style", "nav", "footer", "header",
+        "aside", "form", "noscript", "iframe",
     ]):
         element.decompose()
 
-    article = (
-        soup.find("article")
-        or soup.find("main")
-        or soup.body
-    )
+    paragraphs = []
 
-    if article is None:
-        return "", image_url
+    for element in content_area.find_all(["p", "h2", "h3", "li"]):
+        text = clean_text(element.get_text(" ", strip=True))
 
-    paragraphs = [
-        clean_text(element.get_text(" ", strip=True))
-        for element in article.find_all(
-            ["p", "h2", "h3", "li"]
-        )
-    ]
+        if len(text) >= 30 and text not in paragraphs:
+            paragraphs.append(text)
 
-    content = "\n\n".join(
-        paragraph
-        for paragraph in paragraphs
-        if len(paragraph) > 35
-    )
+    content = "\n\n".join(paragraphs)
+
+    if len(content) < MIN_CONTENT_LENGTH:
+        content = clean_text(content_area.get_text(" ", strip=True))
 
     return content[:15000], image_url
-
-
-def extract_jsonld_events(soup, source):
-    """
-    Read structured Event data when a website provides it.
-    """
-
-    results = []
-
-    def inspect(value):
-        if isinstance(value, list):
-            for item in value:
-                inspect(item)
-            return
-
-        if not isinstance(value, dict):
-            return
-
-        event_type = value.get("@type", "")
-        types = event_type if isinstance(event_type, list) else [event_type]
-
-        if any(str(item).lower() == "event" for item in types):
-            title = clean_text(value.get("name", ""))
-            description = clean_text(value.get("description", ""))
-
-            event_url = normalize_url(
-                value.get("url", ""),
-                source["url"],
-            )
-
-            image = value.get("image", "")
-
-            if isinstance(image, list):
-                image = image[0] if image else ""
-
-            if isinstance(image, dict):
-                image = image.get("url", "")
-
-            image_url = normalize_url(image, source["url"])
-
-            start_date = clean_text(value.get("startDate", ""))
-            event_date = extract_date(start_date)
-
-            location = value.get("location", "")
-
-            if isinstance(location, dict):
-                address = location.get("address", "")
-                if isinstance(address, dict):
-                    address = address.get("streetAddress", "")
-
-                location = (
-                    location.get("name")
-                    or address
-                    or ""
-                )
-
-            content = description or title
-
-            article = build_article(
-                source,
-                title,
-                event_url,
-                content,
-                image_url,
-                event_date,
-                clean_text(str(location)),
-            )
-
-            if article:
-                results.append(article)
-
-        for key, child in value.items():
-            if key not in (
-                "@context",
-                "@type",
-                "name",
-                "description",
-                "url",
-                "image",
-            ):
-                if isinstance(child, (dict, list)):
-                    inspect(child)
-
-    for script in soup.find_all(
-        "script",
-        attrs={"type": "application/ld+json"},
-    ):
-        raw = script.string or script.get_text()
-
-        try:
-            inspect(json.loads(raw))
-        except (json.JSONDecodeError, TypeError):
-            continue
-
-    return results
 
 
 def build_article(
@@ -530,40 +348,134 @@ def build_article(
     event_date="",
     event_location="",
 ):
+    title = clean_text(title)
+    content = clean_text(content)
+
     if not title or not detail_url:
         return None
 
     if is_excluded_url(detail_url):
         return None
 
-    if is_cancelled(title + " " + content):
-        logger.info("Skipping cancelled event: %s", title)
+    if len(title) < 3 or len(title) > 250:
         return None
 
-    if len(content) < MIN_ARTICLE_LENGTH:
-        logger.info("Skipping short content: %s", title)
+    if len(content) < MIN_CONTENT_LENGTH:
+        logger.info("Skipping short item: %s", title)
+        return None
+
+    cancellation_terms = (
+        "evento cancelado", "event cancelled",
+        "event canceled", "show cancelado",
+        "apresentação cancelada", "apresentacao cancelada",
+    )
+
+    combined = (title + " " + content).lower()
+    if any(term in combined for term in cancellation_terms):
+        logger.info("Skipping cancelled item: %s", title)
         return None
 
     return {
         "source_name": source["name"],
         "source_url": detail_url,
-        "original_title": clean_text(title),
+        "original_title": title,
         "original_content": content[:15000],
-        "image_url": image_url,
+        "image_url": image_url or "",
         "image_credit": source["name"] if image_url else "",
         "event_date": event_date or extract_date(content),
-        "event_location": (
-            event_location or extract_location(content)
-        ),
+        "event_location": event_location or extract_location(content),
         "category": source.get("category", "Tourism"),
     }
 
 
-def get_event_card(heading):
-    """
-    Find the nearest parent that contains exactly one h2 event.
-    """
+def extract_jsonld_events(soup, source):
+    results = []
 
+    def inspect(value):
+        if isinstance(value, list):
+            for item in value:
+                inspect(item)
+            return
+
+        if not isinstance(value, dict):
+            return
+
+        event_type = value.get("@type", [])
+        if not isinstance(event_type, list):
+            event_type = [event_type]
+
+        if any(str(item).lower() == "event" for item in event_type):
+            title = clean_text(value.get("name", ""))
+            description = clean_text(value.get("description", ""))
+
+            event_url = normalize_url(
+                value.get("url", ""),
+                source["url"],
+            ) or source["url"]
+
+            image = value.get("image", "")
+            if isinstance(image, list):
+                image = image[0] if image else ""
+            if isinstance(image, dict):
+                image = image.get("url", "")
+
+            image_url = normalize_url(image, source["url"])
+
+            start_date = clean_text(value.get("startDate", ""))
+            event_date = ""
+
+            if start_date:
+                try:
+                    event_date = start_date[:10]
+                    date.fromisoformat(event_date)
+                except ValueError:
+                    event_date = ""
+
+            location = value.get("location", "")
+            if isinstance(location, dict):
+                address = location.get("address", "")
+                if isinstance(address, dict):
+                    address = address.get("streetAddress", "")
+                location = location.get("name") or address or ""
+
+            article = build_article(
+                source,
+                title,
+                event_url,
+                description or title,
+                image_url,
+                event_date,
+                clean_text(location),
+            )
+
+            if article:
+                results.append(article)
+
+        for key, child in value.items():
+            if key not in (
+                "@context", "@type", "name", "description",
+                "url", "image",
+            ) and isinstance(child, (dict, list)):
+                inspect(child)
+
+    for script in soup.find_all(
+        "script",
+        attrs={"type": "application/ld+json"},
+    ):
+        raw = script.string or script.get_text()
+        try:
+            inspect(json.loads(raw))
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    return results
+
+
+def get_card_for_heading(heading):
+    """
+    Find a reasonably small parent container around a heading.
+    The card should contain one main heading and useful text.
+    """
     current = heading
 
     for _ in range(7):
@@ -571,131 +483,182 @@ def get_event_card(heading):
             break
 
         current = current.parent
-        headings = current.find_all("h2")
-
-        if len(headings) != 1:
-            continue
-
+        headings = current.find_all(["h1", "h2", "h3", "h4"])
         text = clean_text(current.get_text(" ", strip=True))
 
-        if 25 <= len(text) <= 3500:
+        if (
+            len(headings) == 1
+            and 35 <= len(text) <= 3500
+        ):
             return current
 
     return None
 
 
-def get_card_detail_link(card, base_url, link_texts=None):
+def get_card_link(card, base_url):
     if not card:
         return ""
 
-    link_texts = link_texts or [
-        "saiba mais",
-        "mais informações",
-        "mais informacoes",
-        "learn more",
-        "ver evento",
-        "detalhes",
-    ]
-
-    matches = []
+    links = []
 
     for link in card.find_all("a", href=True):
-        label = clean_text(
-            link.get_text(" ", strip=True)
-        ).lower()
+        candidate = normalize_url(link["href"], base_url)
 
-        if not any(term in label for term in link_texts):
+        if not candidate or is_excluded_url(candidate):
             continue
 
-        candidate = normalize_url(
-            link["href"], base_url
+        label = clean_text(link.get_text(" ", strip=True)).lower()
+
+        # Avoid social media, navigation and unrelated links.
+        ignored = (
+            "instagram", "facebook", "youtube", "whatsapp",
+            "twitter", "tiktok", "privacy", "política",
+            "politica", "contato", "contact",
         )
 
-        if (
-            candidate
-            and same_domain(candidate, base_url)
-            and not is_excluded_url(candidate)
-        ):
-            if candidate not in matches:
-                matches.append(candidate)
+        if any(word in label for word in ignored):
+            continue
 
-    # Never guess when the card contains multiple detail links.
-    if len(matches) == 1:
-        return matches[0]
+        if candidate not in links:
+            links.append(candidate)
+
+    # Prefer a same-site event/detail page.
+    same_site = [link for link in links if same_domain(link, base_url)]
+
+    if len(same_site) == 1:
+        return same_site[0]
+
+    # If no internal detail page exists, use a single ticket link.
+    ticket_links = [
+        link for link in links
+        if any(
+            domain in urlparse(link).netloc.lower()
+            for domain in (
+                "eventim", "ticketmaster", "livepass",
+                "ingresse", "sympla",
+            )
+        )
+    ]
+
+    if len(ticket_links) == 1:
+        return ticket_links[0]
 
     return ""
 
 
-def collect_vivo_rio(source):
-    """
-    Vivo Rio uses the artist as h2 and the show subtitle as h3.
-    Both belong to one event card.
-    """
-
-    html = fetch_page(source["url"])
-
-    if not html:
+def collect_generic_events(source):
+    soup = get_soup(source["url"])
+    if not soup:
         return []
 
-    soup = BeautifulSoup(html, "html.parser")
+    structured = extract_jsonld_events(soup, source)
+    if structured:
+        logger.info(
+            "%s: found %s structured events",
+            source["name"], len(structured),
+        )
+        return structured[:MAX_ARTICLES_PER_SOURCE]
+
+    articles = []
+    seen = set()
+
+    for heading in soup.find_all(["h1", "h2", "h3", "h4"]):
+        title = clean_text(heading.get_text(" ", strip=True))
+
+        if len(title) < 3 or len(title) > 150:
+            continue
+
+        card = get_card_for_heading(heading)
+        if not card:
+            continue
+
+        detail_url = get_card_link(card, source["url"])
+        if not detail_url or detail_url in seen:
+            continue
+
+        seen.add(detail_url)
+
+        card_text = clean_text(card.get_text(" ", strip=True))
+        image_url = extract_image(card, source["url"])
+
+        # Try the detail page, but keep the card text if it is useful.
+        detail_content, detail_image = extract_article(detail_url)
+
+        content = (
+            detail_content
+            if len(detail_content) >= len(card_text)
+            else card_text
+        )
+
+        image_url = detail_image or image_url
+
+        article = build_article(
+            source,
+            title,
+            detail_url,
+            content,
+            image_url,
+            extract_date(card_text + " " + content),
+            extract_location(card_text + " " + content),
+        )
+
+        if article:
+            articles.append(article)
+            logger.info(
+                "%s: event found: %s",
+                source["name"], title,
+            )
+
+        if len(articles) >= MAX_ARTICLES_PER_SOURCE:
+            break
+
+    logger.info(
+        "%s: generic extractor found %s events",
+        source["name"], len(articles),
+    )
+    return articles
+
+
+def collect_vivo_rio(source):
+    soup = get_soup(source["url"])
+    if not soup:
+        return []
+
     articles = []
     seen = set()
 
     for heading in soup.find_all("h2"):
-        artist = clean_text(
-            heading.get_text(" ", strip=True)
-        )
+        artist = clean_text(heading.get_text(" ", strip=True))
 
         if len(artist) < 2 or len(artist) > 120:
             continue
 
-        card = get_event_card(heading)
-
+        card = get_card_for_heading(heading)
         if not card:
             continue
 
-        if len(card.find_all("h2")) != 1:
-            continue
-
         subtitle = ""
-
         for subheading in card.find_all("h3"):
-            candidate = clean_text(
-                subheading.get_text(" ", strip=True)
-            )
-
+            candidate = clean_text(subheading.get_text(" ", strip=True))
             if candidate and candidate.lower() != artist.lower():
                 subtitle = candidate
                 break
 
-        title = artist
-
-        if subtitle:
-            title = f"{artist} — {subtitle}"
-
-        card_text = clean_text(
-            card.get_text(" ", strip=True)
-        )
-
-        detail_url = get_card_detail_link(
-            card,
-            source["url"],
-        )
+        title = f"{artist} — {subtitle}" if subtitle else artist
+        detail_url = get_card_link(card, source["url"])
 
         if not detail_url or detail_url in seen:
             continue
 
         seen.add(detail_url)
 
+        card_text = clean_text(card.get_text(" ", strip=True))
         content, image_url = extract_article(detail_url)
 
-        if len(content) < MIN_ARTICLE_LENGTH:
+        if len(content) < MIN_CONTENT_LENGTH:
             content = card_text
 
-        if not image_url:
-            image_url = extract_image(
-                card, source["url"]
-            )
+        image_url = image_url or extract_image(card, source["url"])
 
         article = build_article(
             source,
@@ -715,236 +678,20 @@ def collect_vivo_rio(source):
             break
 
     logger.info(
-        "%s extractor found %s events",
-        source["name"],
-        len(articles),
+        "%s: found %s events",
+        source["name"], len(articles),
     )
-
-    return articles
-
-
-def collect_city_hall(source):
-    """
-    Find actual news links rather than navigation headings.
-    """
-
-    html = fetch_page(source["url"])
-
-    if not html:
-        return []
-
-    soup = BeautifulSoup(html, "html.parser")
-    articles = []
-    seen = set()
-
-    for link in soup.find_all("a", href=True):
-        title = clean_text(
-            link.get_text(" ", strip=True)
-        )
-
-        if len(title) < 30 or len(title) > 250:
-            continue
-
-        detail_url = normalize_url(
-            link["href"], source["url"]
-        )
-
-        if (
-            not detail_url
-            or not same_domain(detail_url, source["url"])
-            or is_excluded_url(detail_url)
-            or detail_url.rstrip("/") == source["url"].rstrip("/")
-            or detail_url in seen
-        ):
-            continue
-
-        path = urlparse(detail_url).path.strip("/")
-
-        if not path:
-            continue
-
-        seen.add(detail_url)
-
-        content, image_url = extract_article(detail_url)
-
-        if len(content) < MIN_ARTICLE_LENGTH:
-            logger.info(
-                "Skipping City Hall link with insufficient content: %s",
-                title,
-            )
-            continue
-
-        # Prefer the actual article heading.
-        detail_html = fetch_page(detail_url)
-
-        if detail_html:
-            detail_soup = BeautifulSoup(
-                detail_html, "html.parser"
-            )
-            page_heading = detail_soup.find("h1")
-
-            if page_heading:
-                page_title = clean_text(
-                    page_heading.get_text(" ", strip=True)
-                )
-
-                if len(page_title) >= 12:
-                    title = page_title
-
-        article = build_article(
-            source,
-            title,
-            detail_url,
-            content,
-            image_url,
-            extract_date(content),
-            extract_location(content),
-        )
-
-        if article:
-            articles.append(article)
-            logger.info("City Hall news found: %s", title)
-
-        if len(articles) >= MAX_ARTICLES_PER_SOURCE:
-            break
-
-    logger.info(
-        "%s extractor found %s articles",
-        source["name"],
-        len(articles),
-    )
-
-    return articles
-
-
-def collect_fundicao(source):
-    """
-    Fundição Progresso event cards use 'SAIBA MAIS' links.
-    """
-
-    html = fetch_page(source["url"])
-
-    if not html:
-        return []
-
-    soup = BeautifulSoup(html, "html.parser")
-    articles = []
-    seen = set()
-
-    for link in soup.find_all("a", href=True):
-        label = clean_text(
-            link.get_text(" ", strip=True)
-        ).lower()
-
-        if "saiba mais" not in label:
-            continue
-
-        detail_url = normalize_url(
-            link["href"], source["url"]
-        )
-
-        if (
-            not detail_url
-            or not same_domain(detail_url, source["url"])
-            or is_excluded_url(detail_url)
-            or detail_url in seen
-        ):
-            continue
-
-        card = link
-
-        for _ in range(6):
-            if card.parent is None:
-                break
-
-            card = card.parent
-            text = clean_text(
-                card.get_text(" ", strip=True)
-            )
-            headings = card.find_all(
-                ["h1", "h2", "h3", "h4"]
-            )
-
-            if (
-                headings
-                and 30 <= len(text) <= 1800
-                and len(card.find_all("a", href=True)) <= 5
-            ):
-                break
-
-        headings = card.find_all(
-            ["h1", "h2", "h3", "h4"]
-        )
-
-        if not headings:
-            logger.info(
-                "Fundição card has no clear title; skipping"
-            )
-            continue
-
-        title = clean_text(
-            headings[0].get_text(" ", strip=True)
-        )
-
-        if len(title) < 3:
-            continue
-
-        seen.add(detail_url)
-
-        content, image_url = extract_article(detail_url)
-        card_text = clean_text(
-            card.get_text(" ", strip=True)
-        )
-
-        if len(content) < MIN_ARTICLE_LENGTH:
-            content = card_text
-
-        if not image_url:
-            image_url = extract_image(
-                card, source["url"]
-            )
-
-        article = build_article(
-            source,
-            title,
-            detail_url,
-            content,
-            image_url,
-            extract_date(card_text + " " + content),
-            extract_location(card_text + " " + content),
-        )
-
-        if article:
-            articles.append(article)
-            logger.info("Fundição event found: %s", title)
-
-        if len(articles) >= MAX_ARTICLES_PER_SOURCE:
-            break
-
-    logger.info(
-        "%s extractor found %s events",
-        source["name"],
-        len(articles),
-    )
-
     return articles
 
 
 def collect_qualistage(source):
-    """
-    Qualistage displays event titles and descriptions on its events page.
-    Prefer a unique event-specific ticket/detail URL from each section.
-    """
-
-    html = fetch_page(source["url"])
-
-    if not html:
+    # Keep the working Qualistage-specific approach, with a
+    # generic-card fallback if its page structure changes.
+    soup = get_soup(source["url"])
+    if not soup:
         return []
 
-    soup = BeautifulSoup(html, "html.parser")
-
     structured = extract_jsonld_events(soup, source)
-
     if structured:
         logger.info(
             "Qualistage JSON-LD found %s events",
@@ -955,79 +702,50 @@ def collect_qualistage(source):
     articles = []
     seen = set()
 
-    for heading in soup.find_all("h1"):
-        title = clean_text(
-            heading.get_text(" ", strip=True)
-        )
+    for heading in soup.find_all(["h1", "h2", "h3"]):
+        title = clean_text(heading.get_text(" ", strip=True))
 
         if len(title) < 2 or len(title) > 150:
             continue
 
-        card = heading
-
-        for _ in range(6):
-            if card.parent is None:
-                break
-
-            card = card.parent
-
-            headings = card.find_all("h1")
-            text = clean_text(
-                card.get_text(" ", strip=True)
-            )
-
-            if len(headings) == 1 and 100 <= len(text) <= 12000:
-                break
-
-        if len(card.find_all("h1")) != 1:
+        card = get_card_for_heading(heading)
+        if not card:
             continue
 
-        card_text = clean_text(
-            card.get_text(" ", strip=True)
-        )
-
+        card_text = clean_text(card.get_text(" ", strip=True))
         links = []
 
         for link in card.find_all("a", href=True):
-            candidate = normalize_url(
-                link["href"], source["url"]
-            )
-
-            if not candidate or candidate in links:
-                continue
-
-            label = clean_text(
-                link.get_text(" ", strip=True)
-            ).lower()
+            candidate = normalize_url(link["href"], source["url"])
+            label = clean_text(link.get_text(" ", strip=True)).lower()
 
             if (
-                "ingresso" in label
-                or "ticket" in label
-                or "saiba mais" in label
+                candidate
+                and candidate not in links
+                and (
+                    "ingresso" in label
+                    or "ticket" in label
+                    or "saiba mais" in label
+                    or "comprar" in label
+                )
             ):
                 links.append(candidate)
 
-        # A separate event link is required.
         if len(links) != 1:
             continue
 
         detail_url = links[0]
-
         if detail_url in seen:
             continue
 
         seen.add(detail_url)
 
-        content = card_text
-        image_url = extract_image(
-            card, source["url"]
-        )
-
+        image_url = extract_image(card, source["url"])
         article = build_article(
             source,
             title,
             detail_url,
-            content,
+            card_text,
             image_url,
             extract_date(card_text),
             extract_location(card_text),
@@ -1035,137 +753,162 @@ def collect_qualistage(source):
 
         if article:
             articles.append(article)
-            logger.info(
-                "Qualistage event found: %s",
-                title,
-            )
+            logger.info("Qualistage event found: %s", title)
 
         if len(articles) >= MAX_ARTICLES_PER_SOURCE:
             break
 
     logger.info(
-        "%s extractor found %s events",
-        source["name"],
+        "Qualistage: found %s events",
         len(articles),
     )
-
     return articles
 
 
-def collect_generic_events(source):
+def collect_city_hall(source):
     """
-    Conservative fallback for event sites.
-    Uses structured Event data or clearly linked event cards.
+    Collect news links from the City Hall WordPress site.
+    Retrieve the article text from the actual article page.
     """
-
-    html = fetch_page(source["url"])
-
-    if not html:
+    soup = get_soup(source["url"])
+    if not soup:
         return []
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    structured = extract_jsonld_events(soup, source)
-
-    if structured:
-        logger.info(
-            "%s JSON-LD found %s events",
-            source["name"],
-            len(structured),
-        )
-        return structured[:MAX_ARTICLES_PER_SOURCE]
-
-    logger.info(
-        "%s: no structured Event data found; "
-        "checking clearly linked event cards",
-        source["name"],
-    )
 
     articles = []
     seen = set()
 
-    for heading in soup.find_all(["h1", "h2", "h3"]):
-        title = clean_text(
-            heading.get_text(" ", strip=True)
+    # First try WordPress REST API discovery.
+    base = source["url"].rstrip("/")
+    parsed = urlparse(base)
+    api_url = f"{parsed.scheme}://{parsed.netloc}/wp-json/wp/v2/posts"
+
+    try:
+        response = requests.get(
+            api_url,
+            params={"per_page": 20, "_embed": "1"},
+            headers=HEADERS,
+            timeout=TIMEOUT,
         )
+        response.raise_for_status()
 
-        if len(title) < 3 or len(title) > 150:
-            continue
+        posts = response.json()
 
-        current = heading
-        card = None
-
-        for _ in range(5):
-            if current.parent is None:
-                break
-
-            current = current.parent
-
-            text = clean_text(
-                current.get_text(" ", strip=True)
+        for post in posts:
+            title = clean_text(
+                BeautifulSoup(
+                    post.get("title", {}).get("rendered", ""),
+                    "html.parser",
+                ).get_text(" ", strip=True)
             )
 
-            headings = current.find_all(
-                ["h1", "h2", "h3"]
+            detail_url = normalize_url(
+                post.get("link", ""),
+                source["url"],
             )
 
-            if len(headings) == 1 and 50 <= len(text) <= 2500:
-                card = current
-                break
-
-        if not card:
-            continue
-
-        detail_url = get_card_detail_link(
-            card, source["url"]
-        )
-
-        if not detail_url or detail_url in seen:
-            continue
-
-        seen.add(detail_url)
-
-        content, image_url = extract_article(detail_url)
-
-        card_text = clean_text(
-            card.get_text(" ", strip=True)
-        )
-
-        if len(content) < MIN_ARTICLE_LENGTH:
-            content = card_text
-
-        if not image_url:
-            image_url = extract_image(
-                card, source["url"]
+            content_html = post.get("content", {}).get("rendered", "")
+            content = clean_text(
+                BeautifulSoup(content_html, "html.parser").get_text(" ", strip=True)
             )
 
-        article = build_article(
-            source,
-            title,
-            detail_url,
-            content,
-            image_url,
-            extract_date(card_text + " " + content),
-            extract_location(card_text + " " + content),
-        )
+            image_url = ""
+            embedded = post.get("_embedded", {})
+            media = embedded.get("wp:featuredmedia", [])
 
-        if article:
-            articles.append(article)
-            logger.info(
-                "%s event found: %s",
-                source["name"],
+            if media:
+                image_url = normalize_url(
+                    media[0].get("source_url", ""),
+                    source["url"],
+                )
+
+            if (
+                not title
+                or not detail_url
+                or detail_url in seen
+                or not same_domain(detail_url, source["url"])
+            ):
+                continue
+
+            seen.add(detail_url)
+
+            article = build_article(
+                source,
                 title,
+                detail_url,
+                content,
+                image_url,
+                extract_date(content),
+                extract_location(content),
             )
 
-        if len(articles) >= MAX_ARTICLES_PER_SOURCE:
-            break
+            if article:
+                articles.append(article)
+                logger.info("City Hall news found: %s", title)
+
+            if len(articles) >= MAX_ARTICLES_PER_SOURCE:
+                break
+
+    except (requests.RequestException, ValueError, TypeError) as error:
+        logger.info(
+            "WordPress API unavailable; using page links instead: %s",
+            error,
+        )
+
+    # Fallback: discover article links on the public news page.
+    if not articles:
+        for link in soup.find_all("a", href=True):
+            title = clean_text(link.get_text(" ", strip=True))
+
+            if len(title) < 30 or len(title) > 250:
+                continue
+
+            detail_url = normalize_url(link["href"], source["url"])
+
+            if (
+                not detail_url
+                or not same_domain(detail_url, source["url"])
+                or is_excluded_url(detail_url)
+                or detail_url in seen
+                or detail_url.rstrip("/") == source["url"].rstrip("/")
+            ):
+                continue
+
+            seen.add(detail_url)
+
+            content, image_url = extract_article(detail_url)
+
+            if len(content) < MIN_CONTENT_LENGTH:
+                continue
+
+            detail_soup = get_soup(detail_url)
+            if detail_soup:
+                heading = detail_soup.find("h1")
+                if heading:
+                    page_title = clean_text(heading.get_text(" ", strip=True))
+                    if len(page_title) >= 12:
+                        title = page_title
+
+            article = build_article(
+                source,
+                title,
+                detail_url,
+                content,
+                image_url,
+                extract_date(content),
+                extract_location(content),
+            )
+
+            if article:
+                articles.append(article)
+                logger.info("City Hall news found: %s", title)
+
+            if len(articles) >= MAX_ARTICLES_PER_SOURCE:
+                break
 
     logger.info(
-        "%s generic extractor found %s events",
-        source["name"],
-        len(articles),
+        "%s: found %s articles",
+        source["name"], len(articles),
     )
-
     return articles
 
 
@@ -1175,13 +918,15 @@ def collect_event_source(source):
     if "vivo rio" in name:
         return collect_vivo_rio(source)
 
-    if "fundição" in name or "fundicao" in name:
-        return collect_fundicao(source)
-
     if "qualistage" in name:
         return collect_qualistage(source)
 
     return collect_generic_events(source)
+
+
+def load_sources():
+    with open("sources.json", "r", encoding="utf-8") as file:
+        return json.load(file)["sources"]
 
 
 def collect_news():
@@ -1191,15 +936,13 @@ def collect_news():
         logger.info("=" * 60)
         logger.info("Checking source: %s", source["name"])
 
-        source_type = source.get("type", "web")
-
         try:
+            source_type = source.get("type", "web")
+
             if source_type == "wordpress":
                 articles = collect_city_hall(source)
-
             elif source_type == "events":
                 articles = collect_event_source(source)
-
             else:
                 logger.warning(
                     "Unsupported source type: %s",
@@ -1216,10 +959,8 @@ def collect_news():
 
         logger.info(
             "%s: collected %s items",
-            source["name"],
-            len(articles),
+            source["name"], len(articles),
         )
-
         all_articles.extend(articles)
 
     unique_articles = []
