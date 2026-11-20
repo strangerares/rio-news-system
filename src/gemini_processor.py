@@ -4,16 +4,52 @@ import logging
 import os
 import re
 import time
+import json
+import urllib.parse
+import urllib.request
 
 from google import genai
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+MODEL = os.getenv("GEMINI_MODEL")
 MAX_RETRIES = 1
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+API_KEY = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=API_KEY)
+
+
+def resolve_gemini_model():
+    if MODEL:
+        return MODEL
+
+    if not API_KEY:
+        return "gemini-2.5-flash"
+
+    try:
+        url = "https://generativelanguage.googleapis.com/v1beta/models?" + urllib.parse.urlencode({
+            "key": API_KEY,
+            "pageSize": 1000,
+        })
+        with urllib.request.urlopen(url, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        candidates = []
+        for item in payload.get("models", []):
+            name = item.get("name", "").replace("models/", "")
+            methods = item.get("supportedGenerationMethods", [])
+            if "generateContent" in methods and "flash" in name.lower():
+                candidates.append(name)
+
+        preferred = (
+            name for name in candidates
+            if "lite" not in name.lower() and "preview" not in name.lower()
+        )
+        return next(preferred, candidates[0] if candidates else "gemini-2.5-flash")
+    except Exception as error:
+        logger.warning("Could not list Gemini models: %s", error)
+        return "gemini-2.5-flash"
 
 
 class GeminiQuotaExceeded(Exception):
@@ -213,6 +249,7 @@ def process_article(article):
         }
 
     prompt = build_prompt(title, content, source_name)
+    model = resolve_gemini_model()
 
     for attempt in range(1, MAX_RETRIES + 1):
 
@@ -225,7 +262,7 @@ def process_article(article):
             )
 
             response = client.models.generate_content(
-                model=MODEL,
+                model=model,
                 contents=prompt
             )
 
@@ -317,12 +354,10 @@ def process_article(article):
 
             if "404" in str(error):
                 logger.error(
-                    "Gemini model is unavailable: %s. Configure GEMINI_MODEL with a model available to this API key.",
-                    MODEL,
+                    "Gemini model is unavailable: %s. The API key may not have access to it.",
+                    model,
                 )
-                raise GeminiQuotaExceeded(
-                    "Configured Gemini model is unavailable"
-                ) from error
+                return None
 
             if is_quota_error(error):
                 logger.error(
