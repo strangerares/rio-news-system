@@ -47,6 +47,8 @@ def main():
 
     pending_articles = get_unprocessed_articles()
 
+    pending_articles = pending_articles[:10]
+
     published = 0
     rejected = 0
     needs_review = 0

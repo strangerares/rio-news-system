@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-MAX_RETRIES = 3
+MAX_RETRIES = 1
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
@@ -314,6 +314,15 @@ def process_article(article):
             return processed_article
 
         except Exception as error:
+
+            if "404" in str(error):
+                logger.error(
+                    "Gemini model is unavailable: %s. Configure GEMINI_MODEL with a model available to this API key.",
+                    MODEL,
+                )
+                raise GeminiQuotaExceeded(
+                    "Configured Gemini model is unavailable"
+                ) from error
 
             if is_quota_error(error):
                 logger.error(

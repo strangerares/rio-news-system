@@ -74,7 +74,7 @@ def save_article(article):
         return False
 
 
-def get_unprocessed_articles(limit=100):
+def get_unprocessed_articles(limit=10):
     if not _require_supabase():
         return []
 
