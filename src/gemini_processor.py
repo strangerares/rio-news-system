@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 MODEL = os.getenv("GEMINI_MODEL")
 MAX_RETRIES = 1
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+FALLBACK_MODEL = "gemini-3.1-flash-lite"
 
 API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(
@@ -29,7 +31,7 @@ def resolve_gemini_model():
         return MODEL
 
     if not API_KEY:
-        return "gemini-2.5-flash"
+        return DEFAULT_MODEL
 
     try:
         url = "https://generativelanguage.googleapis.com/v1beta/models?" + urllib.parse.urlencode({
@@ -43,17 +45,20 @@ def resolve_gemini_model():
         for item in payload.get("models", []):
             name = item.get("name", "").replace("models/", "")
             methods = item.get("supportedGenerationMethods", [])
-            if "generateContent" in methods and "flash" in name.lower():
+            if "generateContent" in methods:
                 candidates.append(name)
 
-        preferred = (
-            name for name in candidates
-            if "lite" not in name.lower() and "preview" not in name.lower()
-        )
-        return next(preferred, candidates[0] if candidates else "gemini-2.5-flash")
+        if DEFAULT_MODEL in candidates:
+            return DEFAULT_MODEL
+        if FALLBACK_MODEL in candidates:
+            return FALLBACK_MODEL
+        if "gemini-flash-lite-latest" in candidates:
+            return "gemini-flash-lite-latest"
+
+        return DEFAULT_MODEL
     except Exception as error:
         logger.warning("Could not list Gemini models: %s", error)
-        return "gemini-2.5-flash"
+        return DEFAULT_MODEL
 
 
 class GeminiQuotaExceeded(Exception):

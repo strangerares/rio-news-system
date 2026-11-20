@@ -14,6 +14,20 @@ class GeminiProcessorTests(unittest.TestCase):
             "v1beta",
         )
 
+    def test_default_model_is_supported_flash_lite(self):
+        self.assertEqual(
+            gemini_processor.DEFAULT_MODEL,
+            "gemini-3.5-flash-lite",
+        )
+
+    @patch.object(gemini_processor, "MODEL", "")
+    @patch.object(gemini_processor, "API_KEY", "")
+    def test_resolver_uses_default_model_without_api_key(self):
+        self.assertEqual(
+            gemini_processor.resolve_gemini_model(),
+            "gemini-3.5-flash-lite",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
