@@ -6,8 +6,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Rio Tips | News & Events</title>
 
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-
   <style>
     * { box-sizing: border-box; }
 
@@ -180,11 +178,6 @@
     const SUPABASE_PUBLISHABLE_KEY =
       "sb_publishable_dFAXSPj_Xy5KhiPqVS1mag_pH8ph2ad";
 
-    const supabaseClient = window.supabase.createClient(
-      SUPABASE_URL,
-      SUPABASE_PUBLISHABLE_KEY
-    );
-
     const grid = document.getElementById("news-grid");
     const statusText = document.getElementById("status");
     const refreshButton = document.getElementById("refresh-button");
@@ -277,22 +270,34 @@
       statusText.textContent = "Loading news...";
       grid.replaceChildren();
 
-      const { data, error } = await supabaseClient
-        .from("news_articles")
-        .select(
-          "id, headline, summary, article_content, category, image_url, image_credit, event_date, event_location, published_at, source_name, original_title, original_content, title_en, content_en"
-        )
-        .eq("status", "published")
-        .order("published_at", { ascending: false, nullsFirst: false })
-        .limit(30);
+      let data;
+      try {
+        const params = new URLSearchParams({
+          select: "id,headline,summary,article_content,category,image_url,image_credit,event_date,event_location,published_at,source_name,original_title,original_content,title_en,content_en",
+          status: "eq.published",
+          order: "published_at.desc",
+          limit: "30"
+        });
+        const response = await fetch(`${SUPABASE_URL}/rest/v1/news_articles?${params}`, {
+          headers: {
+            apikey: SUPABASE_PUBLISHABLE_KEY,
+            Authorization: `Bearer ${SUPABASE_PUBLISHABLE_KEY}`
+          }
+        });
 
-      refreshButton.disabled = false;
+        if (!response.ok) {
+          throw new Error(`Supabase returned ${response.status}`);
+        }
 
-      if (error) {
+        data = await response.json();
+      } catch (error) {
         console.error("Supabase error:", error);
         statusText.textContent = "Unable to load news. Please try again later.";
+        refreshButton.disabled = false;
         return;
       }
+
+      refreshButton.disabled = false;
 
       if (!data || data.length === 0) {
         statusText.textContent = "No published articles available yet.";
