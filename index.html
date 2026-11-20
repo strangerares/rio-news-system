@@ -208,14 +208,26 @@
       return element;
     }
 
+    function isUsableImageUrl(value) {
+      if (!value) return false;
+      try {
+        const url = new URL(value);
+        return !/facebook\.com\/tr\b/i.test(url.href);
+      } catch (_) {
+        return false;
+      }
+    }
+
     function createCard(article) {
       const card = document.createElement("article");
       card.className = "card";
 
-      if (article.image_url) {
+      const headline = article.headline || article.title_en || article.original_title || "Rio News";
+
+      if (isUsableImageUrl(article.image_url)) {
         const image = document.createElement("img");
         image.src = article.image_url;
-        image.alt = article.headline || "Rio de Janeiro news";
+        image.alt = headline;
         image.loading = "lazy";
         image.onerror = () => image.remove();
         card.appendChild(image);
@@ -225,7 +237,7 @@
       content.className = "card-content";
 
       addText(content, "div", "category", article.category || "Rio News");
-      addText(content, "h2", "", article.headline || "Rio News");
+      addText(content, "h2", "", headline);
 
       const details = [
         formatDate(article.event_date || article.published_at),
@@ -234,12 +246,15 @@
 
       if (details) addText(content, "div", "meta", details);
 
-      if (article.summary) {
-        addText(content, "p", "summary", article.summary);
+      const summary = article.summary || article.content_en || article.original_content || "";
+      if (summary) {
+        const shortSummary = summary.length > 260 ? summary.slice(0, 260).trimEnd() + "..." : summary;
+        addText(content, "p", "summary", shortSummary);
       }
 
-      if (article.article_content) {
-        const body = addText(content, "div", "article-body", article.article_content);
+      const articleContent = article.article_content || article.content_en || article.original_content;
+      if (articleContent) {
+        const body = addText(content, "div", "article-body", articleContent);
         const button = document.createElement("button");
         button.type = "button";
         button.className = "read-more";
@@ -265,7 +280,7 @@
       const { data, error } = await supabaseClient
         .from("news_articles")
         .select(
-          "id, headline, summary, article_content, category, image_url, image_credit, event_date, event_location, published_at, source_name"
+          "id, headline, summary, article_content, category, image_url, image_credit, event_date, event_location, published_at, source_name, original_title, original_content, title_en, content_en"
         )
         .eq("status", "published")
         .order("published_at", { ascending: false, nullsFirst: false })
