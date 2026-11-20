@@ -9,6 +9,7 @@ import urllib.parse
 import urllib.request
 
 from google import genai
+from google.genai import types
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,7 +18,10 @@ MODEL = os.getenv("GEMINI_MODEL")
 MAX_RETRIES = 1
 
 API_KEY = os.getenv("GEMINI_API_KEY")
-client = genai.Client(api_key=API_KEY)
+client = genai.Client(
+    api_key=API_KEY,
+    http_options=types.HttpOptions(api_version="v1beta"),
+)
 
 
 def resolve_gemini_model():
