@@ -23,6 +23,25 @@
       "url": "https://riotur.rio/evento-calendario/",
       "type": "events",
       "category": "Tourism"
+    },
+    {
+      "name": "Circo Voador",
+      "url": "https://www.circovoador.com.br/",
+      "type": "events",
+      "category": "Music",
+      "api_url": "https://www.circovoador.com.br/circo2017/api/wp-json/api/v2"
+    },
+    {
+      "name": "Fundição Progresso",
+      "url": "https://www.fundicaoprogresso.com.br/Programacao",
+      "type": "events",
+      "category": "Music"
+    },
+    {
+      "name": "Rio Cultural Agenda",
+      "url": "https://agendacultural.rio/",
+      "type": "events",
+      "category": "Culture"
     }
   ]
 }
