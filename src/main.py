@@ -1,7 +1,6 @@
 import logging
 
 from collector import collect_news
-from translate import translate_articles
 from gemini_processor import process_article, GeminiQuotaExceeded
 from supabase_client import (
     save_article,
@@ -22,10 +21,6 @@ def main():
     articles = collect_news()
 
     logger.info("Collected %s events", len(articles))
-
-    # STEP 1.5: Translate to English
-    if articles:
-        articles = translate_articles(articles)
 
     saved = 0
     duplicates = 0

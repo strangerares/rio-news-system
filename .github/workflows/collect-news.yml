@@ -27,6 +27,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Verify required secrets
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ]; then echo "Missing repository secret: SUPABASE_URL"; exit 1; fi
+          if [ -z "$SUPABASE_SERVICE_KEY" ]; then echo "Missing repository secret: SUPABASE_SERVICE_KEY"; exit 1; fi
+          if [ -z "$GEMINI_API_KEY" ]; then echo "Missing repository secret: GEMINI_API_KEY"; exit 1; fi
+
       - name: Collect and publish news
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

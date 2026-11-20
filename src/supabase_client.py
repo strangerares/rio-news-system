@@ -150,6 +150,8 @@ def update_article(source_url, result):
                 "headline": result.get("headline", "").strip(),
                 "summary": result.get("summary", "").strip(),
                 "article_content": result.get("article_content", "").strip(),
+                "title_en": result.get("headline", "").strip(),
+                "content_en": result.get("article_content", "").strip(),
                 "category": result.get("category", "").strip(),
                 "image_url": result.get("image_url") or None,
                 "image_credit": result.get("image_credit") or None,
