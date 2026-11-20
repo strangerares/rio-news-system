@@ -7,6 +7,7 @@ from supabase_client import (
     save_article,
     article_exists,
     get_unprocessed_articles,
+    reprocess_incomplete_articles,
     update_article
 )
 
@@ -44,7 +45,11 @@ def main():
     logger.info("New original events saved: %s", saved)
     logger.info("Duplicates skipped: %s", duplicates)
 
-    # STEP 3: Retrieve events waiting for AI processing.
+    # STEP 3: Reset incomplete published rows, then retrieve pending work.
+    reprocessed = reprocess_incomplete_articles()
+    if reprocessed:
+        logger.info("Reset %s incomplete articles for AI reprocessing", reprocessed)
+
     pending_articles = get_unprocessed_articles()
 
     published = 0

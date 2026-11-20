@@ -93,6 +93,42 @@ def get_unprocessed_articles(limit=100):
         return []
 
 
+def reprocess_incomplete_articles(limit=100):
+    if not _require_supabase():
+        return 0
+
+    try:
+        response = (
+            supabase.table("news_articles")
+            .select("id,source_url,headline,summary,article_content,category")
+            .eq("status", "published")
+            .limit(limit)
+            .execute()
+        )
+
+        reset_count = 0
+        for article in response.data or []:
+            if all(article.get(field) for field in (
+                "headline", "summary", "article_content", "category"
+            )):
+                continue
+
+            supabase.table("news_articles").update({
+                "status": "pending",
+                "published_at": None,
+                "headline": None,
+                "summary": None,
+                "article_content": None,
+                "category": None,
+            }).eq("id", article["id"]).execute()
+            reset_count += 1
+
+        return reset_count
+    except Exception as error:
+        logger.exception("Could not reset incomplete published articles: %s", error)
+        return 0
+
+
 def update_article(source_url, result):
     if not source_url:
         logger.warning("Article has no source URL; cannot update it.")

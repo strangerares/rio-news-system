@@ -265,6 +265,61 @@
       return card;
     }
 
+    async function translateText(value) {
+      if (!value) return "";
+      try {
+        const params = new URLSearchParams({
+          client: "gtx",
+          sl: "pt",
+          tl: "en",
+          dt: "t",
+          q: value
+        });
+        const response = await fetch(`https://translate.googleapis.com/translate_a/single?${params}`);
+        if (!response.ok) return "";
+        const data = await response.json();
+        return (data[0] || []).map(part => part[0] || "").join("");
+      } catch (_) {
+        return "";
+      }
+    }
+
+    async function hydrateCard(card, article) {
+      if (!card.querySelector("img") && article.source_url) {
+        try {
+          const response = await fetch(`https://api.microlink.io/?url=${encodeURIComponent(article.source_url)}&meta=true`);
+          if (response.ok) {
+            const result = await response.json();
+            const imageUrl = result?.data?.image?.url;
+            if (isUsableImageUrl(imageUrl)) {
+              const image = document.createElement("img");
+              image.src = imageUrl;
+              image.alt = article.headline || article.original_title || "Rio de Janeiro news";
+              image.loading = "lazy";
+              image.onerror = () => image.remove();
+              card.prepend(image);
+            }
+          }
+        } catch (_) {}
+      }
+
+      if (!article.headline && !article.title_en && article.original_title) {
+        const translated = await translateText(article.original_title);
+        if (translated) {
+          const heading = card.querySelector("h2");
+          if (heading) heading.textContent = translated;
+        }
+      }
+
+      if (!article.summary && !article.content_en && article.original_content) {
+        const translated = await translateText(article.original_content.slice(0, 240));
+        if (translated) {
+          const summary = card.querySelector(".summary");
+          if (summary) summary.textContent = translated;
+        }
+      }
+    }
+
     async function loadNews() {
       refreshButton.disabled = true;
       statusText.textContent = "Loading news...";
@@ -273,7 +328,7 @@
       let data;
       try {
         const params = new URLSearchParams({
-          select: "id,headline,summary,article_content,category,image_url,image_credit,event_date,event_location,published_at,source_name,original_title,original_content,title_en,content_en",
+          select: "id,source_url,headline,summary,article_content,category,image_url,image_credit,event_date,event_location,published_at,source_name,original_title,original_content,title_en,content_en",
           status: "eq.published",
           order: "published_at.desc",
           limit: "30"
@@ -308,7 +363,11 @@
         return;
       }
 
-      data.forEach(article => grid.appendChild(createCard(article)));
+      data.forEach(article => {
+        const card = createCard(article);
+        grid.appendChild(card);
+        hydrateCard(card, article);
+      });
       statusText.textContent = `${data.length} latest articles`;
     }
 

@@ -110,6 +110,7 @@ CATEGORY_BY_PATH = {
 DEFAULT_LOCATION = {
     "Vivo Rio": "Vivo Rio",
     "Qualistage": "Qualistage",
+    "Circo Voador": "Circo Voador",
 }
 
 BOILERPLATE_CLASS_TOKENS = frozenset({
@@ -128,6 +129,13 @@ BOILERPLATE_CLASS_TOKENS = frozenset({
     "footer-menu",
     "header-menu",
     "skip-link",
+    "sidebar",
+    "breadcrumb-trail",
+    "header",
+    "footer",
+    "logo",
+    "site-logo",
+    "site-branding",
 })
 
 BOILERPLATE_TAGS = ("nav", "header", "footer")
@@ -140,6 +148,9 @@ ARTIST_BLACKLIST = frozenset({
 })
 
 MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
     "janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3,
     "abril": 4, "maio": 5, "junho": 6, "julho": 7,
     "agosto": 8, "setembro": 9, "outubro": 10,
@@ -302,6 +313,13 @@ def normalize_image_url(url, base_url):
     if parsed.scheme not in ("http", "https"):
         return ""
 
+    hostname = parsed.hostname or ""
+    if hostname.endswith("facebook.com") and parsed.path.startswith("/tr"):
+        return ""
+
+    if "pixel" in parsed.path.lower() or "tracking" in parsed.path.lower():
+        return ""
+
     return url
 
 
@@ -403,7 +421,20 @@ def get_soup(url):
     html = fetch_page(url)
     if not html:
         return None
-    return parse_html(html)
+    soup = parse_html(html)
+    page_text = clean_text(soup.get_text(" ", strip=True)).lower()
+    if any(
+        phrase in page_text
+        for phrase in (
+            "request rejected",
+            "your request was denied",
+            "access denied",
+            "support id:",
+        )
+    ):
+        logger.warning("Source returned a request-denied page: %s", url)
+        return None
+    return soup
 
 
 # ---------------------------------------------------------
@@ -473,8 +504,34 @@ def extract_image(container, base_url):
     if not container:
         return ""
 
+    elements = [container, *container.find_all(True)]
+
+    def is_boilerplate(element):
+        for ancestor in (element, *element.parents):
+            if (ancestor.name or "").lower() in (
+                BOILERPLATE_TAGS + ("aside",)
+            ):
+                return True
+
+            tokens = set()
+            for class_name in ancestor.get("class") or []:
+                tokens.update(str(class_name).lower().split())
+            element_id = str(ancestor.get("id") or "").lower()
+            if element_id:
+                tokens.add(element_id)
+            if tokens & BOILERPLATE_CLASS_TOKENS:
+                return True
+
+        return False
+
+    scoped_elements = [
+        element for element in elements if not is_boilerplate(element)
+    ]
+
     # 1. Video posters.
-    for video in container.find_all("video"):
+    for video in scoped_elements:
+        if video.name != "video":
+            continue
         poster = video.get("poster")
         if poster:
             result = normalize_image_url(poster, base_url)
@@ -482,8 +539,10 @@ def extract_image(container, base_url):
                 return result
 
     # 2. <source> tags inside <picture>.
-    for source in container.find_all("source"):
-        for attr in ("srcset", "data-srcset"):
+    for source in scoped_elements:
+        if source.name != "source":
+            continue
+        for attr in ("srcset", "data-srcset", "data-lazy-srcset"):
             srcset = source.get(attr)
             if srcset:
                 widest = _parse_srcset(srcset)
@@ -493,7 +552,7 @@ def extract_image(container, base_url):
                         return result
 
     # 3. Inline / lazy CSS background (background-image or shorthand).
-    for styled in container.find_all(style=True):
+    for styled in scoped_elements:
         style = styled.get("style") or ""
         if "url(" not in style.lower():
             continue
@@ -504,16 +563,22 @@ def extract_image(container, base_url):
                 return result
 
     # 4. data-background / data-bg / data-background-image attributes.
-    for el in container.find_all(attrs=True):
+    for el in scoped_elements:
         for attr in ("data-background", "data-bg", "data-background-image"):
             value = el.get(attr)
-            if value and isinstance(value, str) and "url(" not in value:
+            if not value or not isinstance(value, str):
+                continue
+            if "url(" in value.lower():
+                value = _extract_css_url(value)
+            if value:
                 result = normalize_image_url(value, base_url)
                 if result:
                     return result
 
     # 5. <img> with srcset / data-src / src.
-    for image in container.find_all("img"):
+    for image in scoped_elements:
+        if image.name != "img":
+            continue
         candidates = [
             image.get("data-src"),
             image.get("data-lazy-src"),
@@ -522,11 +587,15 @@ def extract_image(container, base_url):
             image.get("src"),
         ]
 
-        srcset = image.get("srcset") or image.get("data-srcset")
-        if srcset:
-            widest = _parse_srcset(srcset)
-            if widest:
-                candidates.insert(0, widest)
+        for attr in (
+            "srcset", "data-srcset", "data-lazy-srcset",
+            "data-original-srcset",
+        ):
+            srcset = image.get(attr)
+            if srcset:
+                widest = _parse_srcset(srcset)
+                if widest:
+                    candidates.insert(0, widest)
 
         for candidate in candidates:
             if candidate and not candidate.startswith("data:"):
@@ -537,13 +606,8 @@ def extract_image(container, base_url):
     return ""
 
 
-def extract_card_image(card, base_url, max_levels_up=4):
-    """
-    Try the card, then walk up parents.
-
-    Event listing sites often place posters on a wrapper ancestor
-    rather than inside the smallest heading container.
-    """
+def extract_card_image(card, base_url, max_levels_up=4, detail_url=""):
+    """Find a card image without borrowing one from a neighboring item."""
     if not card:
         return ""
 
@@ -551,13 +615,28 @@ def extract_card_image(card, base_url, max_levels_up=4):
     if image:
         return image
 
+    detail_key = canonical_url(detail_url) if detail_url else ""
     parent = card.parent
     for _ in range(max_levels_up):
         if not parent:
             break
-        image = extract_image(parent, base_url)
-        if image:
-            return image
+
+        headings = parent.find_all(["h1", "h2", "h3", "h4"])
+        links = {
+            canonical_url(candidate)
+            for link in parent.find_all("a", href=True)
+            if (candidate := normalize_url(link["href"], base_url))
+        }
+        if (
+            detail_key
+            and detail_key in links
+            and len(links) <= 3
+            and len(headings) <= 3
+            and len(parent.get_text(" ", strip=True)) <= 3500
+        ):
+            image = extract_image(parent, base_url)
+            if image:
+                return image
         parent = parent.parent
 
     return ""
@@ -567,13 +646,18 @@ def extract_page_image(soup, page_url):
     if not soup:
         return ""
 
-    for key in ("og:image", "twitter:image", "twitter:image:src"):
+    for key in (
+        "og:image", "og:image:secure_url",
+        "twitter:image", "twitter:image:src",
+    ):
         tag = (
             soup.find("meta", property=key)
             or soup.find("meta", attrs={"name": key})
         )
         if tag and tag.get("content"):
-            return normalize_image_url(tag["content"], page_url)
+            image_url = normalize_image_url(tag["content"], page_url)
+            if image_url:
+                return image_url
 
     return ""
 
@@ -743,6 +827,112 @@ def extract_date(text, event_calendar=False):
     return ""
 
 
+def extract_explicit_event_date(text):
+    if not text:
+        return ""
+
+    normalized = clean_text(text).lower()
+    event_terms = (
+        "evento", "event", "show", "concert", "festival", "festa",
+        "apresentação", "apresentacao", "acontece", "acontecerá",
+        "acontecera", "será realizado", "sera realizado",
+        "takes place", "will take place", "réveillon", "reveillon",
+        "new year's eve", "new years eve", "carnaval",
+    )
+    excluded_terms = (
+        "published on", "publicado em", "publicado no dia",
+        "published:", "updated on", "atualizado em",
+        "atualizado:", "posted on", "posted:",
+        "pré-venda", "pre-venda", "pre venda",
+        "venda de ingressos", "vendas de ingressos",
+        "ingressos à venda", "ingressos a venda",
+        "compra de ingressos", "comprar ingressos",
+        "bilheteria", "abertura das vendas",
+    )
+
+    patterns = (
+        (
+            re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b"),
+            lambda match: date(
+                int(match.group(3)),
+                int(match.group(2)),
+                int(match.group(1)),
+            ),
+        ),
+        (
+            re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b"),
+            lambda match: date.fromisoformat(match.group(1)),
+        ),
+        (
+            re.compile(
+                r"\b(?:dia\s+)?(\d{1,2})\s+de\s+"
+                r"(janeiro|fevereiro|março|marco|abril|maio|junho|"
+                r"julho|agosto|setembro|outubro|novembro|dezembro)"
+                r"\s+de\s+(20\d{2})\b"
+            ),
+            lambda match: date(
+                int(match.group(3)),
+                MONTHS[match.group(2)],
+                int(match.group(1)),
+            ),
+        ),
+        (
+            re.compile(
+                r"\b("
+                + "|".join(
+                    re.escape(month)
+                    for month in sorted(MONTHS, key=len, reverse=True)
+                )
+                + r")\s+(\d{1,2}),?\s+(20\d{2})\b"
+            ),
+            lambda match: date(
+                int(match.group(3)),
+                MONTHS[match.group(1)],
+                int(match.group(2)),
+            ),
+        ),
+        (
+            re.compile(
+                r"\b(\d{1,2})\s+("
+                + "|".join(
+                    re.escape(month)
+                    for month in sorted(MONTHS, key=len, reverse=True)
+                )
+                + r")\s+(20\d{2})\b"
+            ),
+            lambda match: date(
+                int(match.group(3)),
+                MONTHS[match.group(2)],
+                int(match.group(1)),
+            ),
+        ),
+    )
+
+    for pattern, make_date in patterns:
+        for match in pattern.finditer(normalized):
+            sentence_start = max(
+                normalized.rfind(separator, 0, match.start())
+                for separator in (".", "!", "?")
+            ) + 1
+            sentence_ends = [
+                position
+                for separator in (".", "!", "?")
+                if (position := normalized.find(separator, match.end())) >= 0
+            ]
+            sentence_end = min(sentence_ends) if sentence_ends else len(normalized)
+            context = normalized[sentence_start:sentence_end]
+            if any(term in context for term in excluded_terms):
+                continue
+            if not any(term in context for term in event_terms):
+                continue
+            try:
+                return make_date(match).isoformat()
+            except ValueError:
+                continue
+
+    return ""
+
+
 def extract_date_from_time_tags(container):
     if not container:
         return ""
@@ -818,20 +1008,6 @@ def extract_article_from_soup(soup, page_url):
 
     image_url = extract_page_image(soup, page_url)
 
-    if trafilatura:
-        try:
-            extracted = trafilatura.extract(
-                str(soup),
-                include_comments=False,
-                include_tables=False,
-                favor_precision=True,
-            )
-            extracted = clean_content(extracted)
-            if len(extracted) >= MIN_CONTENT_LENGTH:
-                return extracted[:15000], image_url
-        except Exception as error:
-            logger.debug("Trafilatura extraction failed: %s", error)
-
     selectors = [
         ".entry-content",
         ".post-content",
@@ -850,6 +1026,30 @@ def extract_article_from_soup(soup, page_url):
 
     if not content_area:
         content_area = soup.body or soup
+
+    if content_area:
+        image_area = parse_html(str(content_area))
+        for element in image_area.find_all([
+            "script", "style", "nav", "footer", "header",
+            "aside", "form", "noscript", "iframe",
+        ]):
+            element.decompose()
+        if not image_url:
+            image_url = extract_image(image_area, page_url)
+
+    if trafilatura:
+        try:
+            extracted = trafilatura.extract(
+                str(soup),
+                include_comments=False,
+                include_tables=False,
+                favor_precision=True,
+            )
+            extracted = clean_content(extracted)
+            if len(extracted) >= MIN_CONTENT_LENGTH:
+                return extracted[:15000], image_url
+        except Exception as error:
+            logger.debug("Trafilatura extraction failed: %s", error)
 
     if not content_area:
         return "", image_url
@@ -908,7 +1108,11 @@ def build_article(
 
     if not title or not detail_url:
         return None
-    if is_excluded_url(detail_url):
+    api_base = source.get("api_url", "").rstrip("/")
+    is_known_api_detail = bool(
+        api_base and detail_url.startswith(api_base + "/")
+    )
+    if is_excluded_url(detail_url) and not is_known_api_detail:
         return None
     if len(title) < 3 or len(title) > 250:
         return None
@@ -921,6 +1125,13 @@ def build_article(
         and len(content) < MIN_EVENT_CONTENT_LENGTH
     ):
         logger.info("Skipping thin event content: %s", title)
+        return None
+
+    if (
+        source.get("type") == "events"
+        and not has_meaningful_event_content(content, title)
+    ):
+        logger.info("Skipping non-specific event content: %s", title)
         return None
 
     cancellation_terms = (
@@ -948,10 +1159,11 @@ def build_article(
         logger.warning("Skipping WAF block page: %s", title)
         return None
 
+    is_general_news = source.get("type") == "wordpress"
     final_category = (
         category
         or derive_category(detail_url)
-        or source.get("category")
+        or ("News" if is_general_news else source.get("category"))
         or "News"
     )
 
@@ -968,10 +1180,84 @@ def build_article(
         "original_content": content[:15000],
         "image_url": image_url or "",
         "image_credit": source["name"] if image_url else "",
-        "event_date": event_date or extract_date(content),
+        "event_date": (
+            extract_explicit_event_date(title + " " + content)
+            if is_general_news
+            else event_date or extract_date(content)
+        ),
         "event_location": final_location,
         "category": final_category,
     }
+
+
+def has_meaningful_event_content(content, title=""):
+    """Reject event pages made up of controls, promo slogans, or boilerplate."""
+    ignored_phrases = (
+        "saiba mais", "compre seu ingresso", "compre ingressos",
+        "comprar ingresso", "garanta seu ingresso", "ingressos",
+        "clique aqui", "ver mais", "confira", "não perca",
+        "imperdível", "acesse aqui", "menu", "home",
+    )
+    meaningful_lines = []
+
+    for line in clean_content(content).splitlines():
+        line = clean_text(line)
+        if len(line) < 40:
+            continue
+        normalized = line.lower()
+        words = re.findall(r"\b[\wÀ-ÿ'-]+\b", normalized)
+        if len(words) < 8:
+            continue
+        if len(set(words)) / len(words) < 0.4:
+            continue
+        if any(phrase in normalized for phrase in ignored_phrases):
+            stripped = normalized
+            for phrase in ignored_phrases:
+                stripped = stripped.replace(phrase, " ")
+            residual_words = re.findall(r"\b[\wÀ-ÿ'-]+\b", stripped)
+            if len(residual_words) < 8:
+                continue
+        meaningful_lines.append(line)
+
+    if not meaningful_lines:
+        return False
+
+    normalized_content = " ".join(meaningful_lines).lower()
+    full_content = clean_content(content).lower()
+    generic_title_terms = {
+        "show", "event", "evento", "concert", "music", "live",
+        "festival", "apresentacao", "apresentação", "tour",
+        "ingresso", "ingressos", "circo", "rio",
+    }
+    title_terms = {
+        word for word in re.findall(r"\b[\wÀ-ÿ'-]+\b", title.lower())
+        if len(word) >= 4 and word not in generic_title_terms
+    }
+    if title_terms and any(word in full_content for word in title_terms):
+        return True
+
+    has_event_context = re.search(
+        r"\b(show|evento|event|festival|apresenta|concert|performance|"
+        r"espet[aá]culo|turn[eê]|artistas?|bandas?|cantor(?:a)?|"
+        r"palco|recebe|festa|djs?|m[uú]sica)\b",
+        normalized_content,
+    )
+    has_specific_detail = (
+        re.search(
+            r"\b20\d{2}-\d{2}-\d{2}\b|\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b",
+            normalized_content,
+        )
+        or re.search(r"\b\d{1,2}[:h]\d{2}\b", normalized_content)
+        or re.search(r"\b(?:local|venue|onde)\s*:", normalized_content)
+        or any(
+            venue.casefold() in normalized_content
+            for venue in (
+                "vivo rio", "qualistage", "circo voador",
+                "fundição progresso", "fundicao progresso",
+            )
+        )
+    )
+    return bool(has_event_context and has_specific_detail)
 
 
 # ---------------------------------------------------------
@@ -1003,10 +1289,12 @@ def extract_jsonld_events(soup, source):
             title = clean_text(value.get("name", ""))
             description = clean_content(value.get("description", ""))
 
-            event_url = normalize_url(
-                value.get("url", ""),
-                source["url"],
-            ) or source["url"]
+            event_url = normalize_url(value.get("url", ""), source["url"])
+            if (
+                not event_url
+                or canonical_url(event_url) == canonical_url(source["url"])
+            ):
+                event_url = ""
 
             image = value.get("image", "")
             if isinstance(image, list):
@@ -1036,26 +1324,24 @@ def extract_jsonld_events(soup, source):
                     )
                 location = location.get("name") or address or ""
 
-            if len(description) < MIN_CONTENT_LENGTH:
-                if (
-                    event_url != source["url"]
-                    and same_domain(event_url, source["url"])
-                ):
+            if len(description) < MIN_CONTENT_LENGTH and event_url:
+                if same_domain(event_url, source["url"]):
                     detail_content, detail_image, _ = extract_article(event_url)
                     if len(detail_content) > len(description):
                         description = detail_content
                     image_url = image_url or detail_image
 
-            article = build_article(
-                source, title, event_url, description,
-                image_url, event_date, clean_text(location),
-            )
+            if event_url:
+                article = build_article(
+                    source, title, event_url, description,
+                    image_url, event_date, clean_text(location),
+                )
 
-            if article:
-                key = canonical_url(article["source_url"])
-                if key not in seen:
-                    seen.add(key)
-                    results.append(article)
+                if article:
+                    key = canonical_url(article["source_url"])
+                    if key not in seen:
+                        seen.add(key)
+                        results.append(article)
 
         for child_key, child in value.items():
             if child_key not in (
@@ -1164,7 +1450,11 @@ def get_card_link(card, base_url, title=""):
 
     for link in card.find_all("a", href=True):
         candidate = normalize_url(link["href"], base_url)
-        if not candidate or is_excluded_url(candidate):
+        if (
+            not candidate
+            or canonical_url(candidate) == canonical_url(base_url)
+            or is_excluded_url(candidate)
+        ):
             continue
 
         label = clean_text(link.get_text(" ", strip=True)).lower()
@@ -1239,6 +1529,7 @@ def collect_generic_events(source):
 
     articles = []
     seen = set()
+    seen_content = set()
 
     for heading in soup.find_all(["h1", "h2", "h3", "h4"]):
         title = clean_text(heading.get_text(" ", strip=True))
@@ -1254,6 +1545,14 @@ def collect_generic_events(source):
         if not detail_url:
             logger.debug("No link for heading: %s", title[:60])
             continue
+        if (
+            source.get("name", "").lower() == "riotur"
+            and not urlparse(detail_url).path.startswith(
+                "/evento-calendario/"
+            )
+        ):
+            logger.debug("Skipping non-event Riotur link: %s", detail_url)
+            continue
 
         key = canonical_url(detail_url)
         if key in seen:
@@ -1261,7 +1560,9 @@ def collect_generic_events(source):
         seen.add(key)
 
         card_text = clean_content(card.get_text("\n", strip=True))
-        image_url = extract_card_image(card, source["url"])
+        image_url = extract_card_image(
+            card, source["url"], detail_url=detail_url
+        )
 
         detail_content, detail_image, _ = extract_article(detail_url)
 
@@ -1271,10 +1572,19 @@ def collect_generic_events(source):
             else card_text
         )
         image_url = detail_image or image_url
+        event_date = extract_event_date(card, content)
+        content_key = (
+            clean_text(title).casefold(),
+            clean_text(content).casefold(),
+            event_date,
+        )
+        if content_key in seen_content:
+            continue
+        seen_content.add(content_key)
 
         article = build_article(
             source, title, detail_url, content, image_url,
-            extract_event_date(card, content),
+            event_date,
             extract_location(card_text + " " + content),
         )
 
@@ -1339,17 +1649,108 @@ def _find_artist_from_detail(detail_soup):
     h1 = detail_soup.find("h1")
     if h1:
         text = clean_text(h1.get_text(" ", strip=True))
-        if 2 <= len(text) <= 120:
+        if 2 <= len(text) <= 120 and text.upper() not in ARTIST_BLACKLIST:
             return text
 
     title_tag = detail_soup.find("title")
     if title_tag:
         text = clean_text(title_tag.get_text(" ", strip=True))
         text = re.split(r"\s+[-|–—]\s+", text, maxsplit=1)[0]
-        if 2 <= len(text) <= 120:
+        if (
+            2 <= len(text) <= 120
+            and text.upper() not in ARTIST_BLACKLIST
+            and "vivo rio" not in text.lower()
+        ):
             return text
 
     return ""
+
+
+def _find_vivo_artist(card, detail_soup):
+    if card:
+        for heading in card.find_all(["h1", "h2", "h3", "h4"]):
+            text = clean_text(heading.get_text(" ", strip=True))
+            if (
+                text
+                and not _looks_like_subtitle(text)
+                and text.upper() not in ARTIST_BLACKLIST
+                and not re.search(
+                    r"\b(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\b",
+                    text.lower(),
+                )
+            ):
+                return text
+
+        for image in card.find_all("img"):
+            alt = clean_text(image.get("alt", ""))
+            if (
+                alt
+                and not _looks_like_subtitle(alt)
+                and alt.upper() not in ARTIST_BLACKLIST
+            ):
+                return alt
+
+    return _find_artist_from_detail(detail_soup)
+
+
+def _clean_vivo_subtitle(text):
+    return clean_text(re.sub(
+        r"^(?:apresenta(?:ção)?|show|evento|tour)\s*:\s*",
+        "",
+        clean_text(text),
+        flags=re.IGNORECASE,
+    ))
+
+
+def _vivo_card_title(card):
+    status_text = {
+        "cancelado", "cancelled", "canceled", "esgotado",
+        "pré-venda", "pre-venda", "nenhum", "nova data",
+    }
+
+    def is_non_title(text):
+        normalized = text.lower()
+        return (
+            normalized in status_text
+            or bool(re.match(
+                r"^\d{1,2}\s*[|/]\s*"
+                r"(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\b",
+                normalized,
+            ))
+            or bool(re.match(r"^\d{1,2}(?:h|:)\d{2}\b", normalized))
+        )
+
+    headings = [
+        clean_text(heading.get_text(" ", strip=True))
+        for heading in card.find_all(["h1", "h2", "h3", "h4"])
+    ]
+    headings = [
+        text for text in headings
+        if text and not is_non_title(text)
+    ]
+
+    artist = next(
+        (text for text in headings if not _looks_like_subtitle(text)),
+        "",
+    )
+    if not artist:
+        for image in card.find_all("img"):
+            alt = clean_text(image.get("alt", ""))
+            if alt and not is_non_title(alt) and not _looks_like_subtitle(alt):
+                artist = alt
+                break
+
+    if not artist:
+        return headings[0] if headings else ""
+
+    subtitle = ""
+    for text in headings:
+        if text == artist:
+            continue
+        subtitle = _clean_vivo_subtitle(text)
+        break
+
+    return f"{artist} — {subtitle}" if subtitle else artist
 
 
 def collect_vivo_rio(source):
@@ -1364,6 +1765,67 @@ def collect_vivo_rio(source):
             len(structured),
         )
         return structured[:MAX_ARTICLES_PER_SOURCE]
+
+    event_cards = soup.select(".e-loop-item")
+    if event_cards:
+        articles = []
+        seen = set()
+
+        for card in event_cards:
+            title = _vivo_card_title(card)
+            if len(title) < 2 or len(title) > 250:
+                continue
+
+            detail_url = get_card_link(card, source["url"], title)
+            if not detail_url:
+                logger.debug("Vivo Rio: no link for %s", title[:60])
+                continue
+
+            key = canonical_url(detail_url)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            card_text = clean_content(card.get_text("\n", strip=True))
+            if any(
+                term in card_text.lower()
+                for term in (
+                    "evento cancelado", "show cancelado",
+                    "apresentação cancelada", "apresentacao cancelada",
+                    "cancelled", "canceled",
+                )
+            ) or re.search(r"\bcancelado\b", card_text, re.IGNORECASE):
+                logger.info("Skipping cancelled Vivo Rio event: %s", title)
+                continue
+
+            content, detail_image, _ = extract_article(detail_url)
+            if len(content) < MIN_CONTENT_LENGTH:
+                content = card_text
+
+            image_url = detail_image or extract_card_image(
+                card, source["url"], detail_url=detail_url
+            )
+            article = build_article(
+                source,
+                title,
+                detail_url,
+                content,
+                image_url,
+                extract_event_date(card, content),
+                extract_location(card_text + " " + content),
+            )
+            if article:
+                articles.append(article)
+                logger.info("Vivo Rio event found: %s", title)
+
+            if len(articles) >= MAX_ARTICLES_PER_SOURCE:
+                break
+
+        logger.info(
+            "%s: found %s events",
+            source["name"], len(articles),
+        )
+        return articles
 
     articles = []
     seen = set()
@@ -1407,7 +1869,9 @@ def collect_vivo_rio(source):
         if len(content) < MIN_CONTENT_LENGTH:
             content = card_text
 
-        image_url = image_url or extract_card_image(card, source["url"])
+        image_url = image_url or extract_card_image(
+            card, source["url"], detail_url=detail_url
+        )
 
         content_artist = _extract_artist_from_content(content)
 
@@ -1415,14 +1879,22 @@ def collect_vivo_rio(source):
             content_artist
             and content_artist.lower() != heading_text.lower()
         ):
-            title = f"{content_artist} — {heading_text}"
+            subtitle_text = (
+                _clean_vivo_subtitle(heading_text)
+                if _looks_like_subtitle(heading_text)
+                else heading_text
+            )
+            title = f"{content_artist} — {subtitle_text}"
         elif _looks_like_subtitle(heading_text):
-            artist = _find_artist_from_detail(detail_soup)
-            if not artist:
-                artist = heading_text
-            title = f"{artist} — {heading_text}"
+            artist = _find_vivo_artist(card, detail_soup)
+            subtitle_text = _clean_vivo_subtitle(heading_text)
+            title = (
+                f"{artist} — {subtitle_text}"
+                if artist and subtitle_text
+                else heading_text
+            )
         else:
-            artist = heading_text
+            artist = _find_vivo_artist(card, detail_soup) or heading_text
             title = (
                 f"{artist} — {subtitle}"
                 if subtitle
@@ -1530,7 +2002,9 @@ def collect_qualistage(source):
 
         image_url = (
             detail_image
-            or extract_card_image(card, source["url"])
+            or extract_card_image(
+                card, source["url"], detail_url=detail_url
+            )
         )
 
         combined_text = card_text + "\n\n" + (detail_content or "")
@@ -1555,6 +2029,232 @@ def collect_qualistage(source):
 
     logger.info(
         "Qualistage: found %s events", len(articles),
+    )
+    return articles
+
+
+# ---------------------------------------------------------
+# FUNDIÇÃO PROGRESSO
+# ---------------------------------------------------------
+
+def _circo_field_text(value):
+    if not isinstance(value, str) or not value.strip():
+        return ""
+
+    soup = BeautifulSoup(value, "html.parser")
+    for element in soup.find_all(["script", "style", "noscript"]):
+        element.decompose()
+    return clean_content(soup.get_text("\n", strip=True))
+
+
+def collect_circo_voador(source):
+    api_url = source.get("api_url", "").rstrip("/")
+    if not api_url:
+        logger.warning("Circo Voador API URL is not configured")
+        return []
+
+    events_url = f"{api_url}/eventos"
+    if not robots_allowed(events_url):
+        logger.info("Skipping disallowed Circo Voador API: %s", events_url)
+        return []
+
+    try:
+        wait_for_host(events_url)
+        response = SESSION.get(events_url, timeout=TIMEOUT)
+        response.raise_for_status()
+        events = response.json()
+    except (requests.RequestException, ValueError) as error:
+        logger.warning("Circo Voador API request failed: %s", error)
+        return []
+
+    if not isinstance(events, list):
+        logger.warning("Circo Voador API returned an unexpected response")
+        return []
+
+    logger.info("Circo Voador API returned %s records", len(events))
+    articles = []
+    today = date.today()
+
+    for event_index, event in enumerate(events):
+        if not isinstance(event, dict):
+            logger.debug("Skipping malformed Circo Voador event")
+            continue
+
+        event_id = clean_text(event.get("Id", ""))
+        if not event_id:
+            logger.debug("Skipping Circo Voador event without an ID")
+            continue
+
+        artists = event.get("artistas", [])
+        if not isinstance(artists, list):
+            artists = []
+        artist_names = [
+            _circo_field_text(name)
+            for name in artists
+            if isinstance(name, str) and _circo_field_text(name)
+        ]
+
+        raw_title = event.get("meta_titulo", "")
+        fallback_title = _circo_field_text(raw_title)
+        fallback_title = re.sub(
+            r"\s*::\s*Circo Voador$",
+            "",
+            fallback_title,
+            flags=re.IGNORECASE,
+        )
+        title = " + ".join(artist_names) or fallback_title
+        if not title:
+            logger.debug(
+                "Skipping Circo Voador event %s without a title",
+                event_id,
+            )
+            continue
+
+        content_parts = []
+        for field in ("chamada", "texto_adicional_capa"):
+            part = _circo_field_text(event.get(field))
+            if part and part not in content_parts:
+                content_parts.append(part)
+        content = "\n\n".join(content_parts)
+
+        description = _circo_field_text(event.get("meta_descricao"))
+        if (
+            description
+            and any(
+                name.casefold() in description.casefold()
+                for name in artist_names
+            )
+            and not has_meaningful_event_content(content, title)
+        ):
+            content = "\n\n".join(
+                part for part in (content, description) if part
+            )
+
+        raw_date = clean_text(event.get("data_raw", ""))
+        event_date = ""
+        if re.fullmatch(r"20\d{6}", raw_date):
+            try:
+                event_date = date.fromisoformat(
+                    f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
+                ).isoformat()
+            except ValueError:
+                logger.info(
+                    "Ignoring invalid Circo Voador event date %s",
+                    raw_date,
+                )
+        elif raw_date:
+            logger.info(
+                "Ignoring unsupported Circo Voador event date %s",
+                raw_date,
+            )
+
+        if event_date and date.fromisoformat(event_date) < today:
+            logger.info(
+                "Skipping past Circo Voador event: %s (%s)",
+                title, event_date,
+            )
+            continue
+
+        image = event.get("meta_imagem", {})
+        if isinstance(image, dict):
+            image = image.get("url", "")
+        elif not isinstance(image, str):
+            image = ""
+        image_url = normalize_image_url(image, source["url"])
+
+        detail_url = normalize_url(
+            f"{api_url}/eventos/{event_id}",
+            source["url"],
+        )
+        article = build_article(
+            source,
+            title,
+            detail_url,
+            content,
+            image_url,
+            event_date,
+            "Circo Voador",
+        )
+        if article:
+            articles.append(article)
+            logger.info("Circo Voador event found: %s", title)
+
+        if len(articles) >= MAX_ARTICLES_PER_SOURCE:
+            remaining = len(events) - event_index - 1
+            if remaining:
+                logger.info(
+                    "Circo Voador reached the per-source limit; "
+                    "%s API records were not evaluated",
+                    remaining,
+                )
+            break
+
+    logger.info("Circo Voador: found %s events", len(articles))
+    return articles
+
+
+def collect_fundicao_progresso(source):
+    soup = get_soup(source["url"])
+    if not soup:
+        return []
+
+    articles = []
+    seen = set()
+
+    for card in soup.select(".programacao__item[href]"):
+        detail_url = normalize_url(card.get("href", ""), source["url"])
+        if not detail_url or is_excluded_url(detail_url):
+            continue
+
+        key = canonical_url(detail_url)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        card_title = card.select_one(".main-banner__title")
+        title = clean_text(
+            card_title.get_text(" ", strip=True)
+            if card_title else ""
+        )
+        card_text = clean_content(card.get_text("\n", strip=True))
+        card_image = extract_card_image(
+            card, source["url"], detail_url=detail_url
+        )
+
+        content, detail_image, detail_soup = extract_article(detail_url)
+        if detail_soup:
+            detail_title = detail_soup.select_one(
+                ".programacao__banner-title"
+            )
+            if detail_title:
+                title = clean_text(detail_title.get_text(" ", strip=True))
+
+        content = (
+            content
+            if len(content) >= len(card_text)
+            else card_text
+        )
+        image_url = detail_image or card_image
+
+        article = build_article(
+            source,
+            title,
+            detail_url,
+            content,
+            image_url,
+            extract_event_date(card, content),
+            extract_location(content),
+        )
+        if article:
+            articles.append(article)
+            logger.info("Fundição Progresso event found: %s", title)
+
+        if len(articles) >= MAX_ARTICLES_PER_SOURCE:
+            break
+
+    logger.info(
+        "Fundição Progresso: found %s events",
+        len(articles),
     )
     return articles
 
@@ -1606,20 +2306,21 @@ def collect_city_hall(source):
                 ).get("rendered", "")
 
                 content_soup = parse_html(content_html)
-                content, _ = extract_article_from_soup(
+                content, content_image = extract_article_from_soup(
                     content_soup,
                     detail_url or source["url"],
                 )
 
-                image_url = ""
+                image_url = content_image
                 embedded = post.get("_embedded", {})
                 media = embedded.get("wp:featuredmedia", [])
 
                 if media:
-                    image_url = normalize_image_url(
+                    featured_image = normalize_image_url(
                         media[0].get("source_url", ""),
                         source["url"],
                     )
+                    image_url = featured_image or image_url
 
                 if (
                     not title
@@ -1638,6 +2339,7 @@ def collect_city_hall(source):
                     image_url,
                     "",
                     extract_location(content),
+                    derive_category(detail_url) or "News",
                 )
 
                 if article:
@@ -1710,6 +2412,7 @@ def collect_city_hall(source):
                 source, title, detail_url, content,
                 image_url, "",
                 extract_location(content),
+                derive_category(detail_url) or "News",
             )
 
             if article:
@@ -1740,6 +2443,12 @@ def collect_event_source(source):
 
     if "qualistage" in name:
         return collect_qualistage(source)
+
+    if "circo voador" in name:
+        return collect_circo_voador(source)
+
+    if "fundição progresso" in name or "fundicao progresso" in name:
+        return collect_fundicao_progresso(source)
 
     return collect_generic_events(source)
 
