@@ -17,6 +17,12 @@
       "url": "https://vivorio.com.br/",
       "type": "events",
       "category": "Music"
+    },
+    {
+      "name": "Riotur",
+      "url": "https://riotur.rio/evento-calendario/",
+      "type": "events",
+      "category": "Tourism"
     }
   ]
 }
